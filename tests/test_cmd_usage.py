@@ -14,6 +14,7 @@ import argparse  # noqa: E402
 import contextlib  # noqa: E402
 import io  # noqa: E402
 import json  # noqa: E402
+import re  # noqa: E402
 import shutil  # noqa: E402
 import subprocess  # noqa: E402
 import time  # noqa: E402
@@ -200,11 +201,12 @@ class TestGrouping(UsageBase):
     def test_text_output(self):
         code, out = self.run_cmd()
         self.assertEqual(code, 0)
+        plain_out = re.sub(r"\x1b\[[0-9;]*m", "", out)
         for needle in ("OmniCLI usage", "all time", "~Tokens in", "~Tokens out", "Total", "5m00s",
                        "Most expensive run: Shop", "Failure rate:", "agy 1/2 (50%", "estimates (characters / 4)",
                        "omnicli usage --native"):
-            self.assertIn(needle, out)
-        total_line = [l for l in out.splitlines() if l.strip().startswith("Total")][0]
+            self.assertIn(needle, plain_out)
+        total_line = [l for l in plain_out.splitlines() if l.strip().startswith("Total")][0]
         self.assertIn("6", total_line)
         self.assertIn("6m42s", total_line)
 
