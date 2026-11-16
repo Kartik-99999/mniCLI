@@ -383,7 +383,7 @@ class TestInit(ConfigBase):
         p.write_text(json.dumps(example))
         specs = ag.load_agent_specs(p)
         self.assertIn("mybot", specs)
-        self.assertNotIn("gemini", specs)
+        self.assertNotIn("agy", specs)
         self.assertEqual(specs["claude"]["strengths"], example["agents"]["claude"]["strengths"])
         self.assertEqual(specs["claude"]["bin"], "claude")
 

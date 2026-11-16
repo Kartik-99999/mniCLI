@@ -21,7 +21,7 @@ from omnicli import paths, runs  # noqa: E402
 from omnicli.commands import logs as L  # noqa: E402
 
 ANSI = re.compile(r"\x1b\[[0-9;]*m")
-BUILTINS = ["claude", "codex", "agy", "muse", "gemini"]
+BUILTINS = ["claude", "codex", "agy", "muse"]
 
 
 def plain(text: str) -> str:

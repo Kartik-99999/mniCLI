@@ -298,12 +298,12 @@ class TestNative(UsageBase):
         "codex": {"id": "codex", "name": "Codex CLI", "bin": "codex"},
         "agy": {"id": "agy", "name": "Antigravity CLI", "bin": "agy"},
         "muse": {"id": "muse", "name": "Muse Code", "bin": "muse"},
-        "gemini": {"id": "gemini", "name": "Gemini CLI", "bin": "gemini"},
+        "ghostbot": {"id": "ghostbot", "name": "Ghost Bot", "bin": "ghostbot"},
         "mybot": {"id": "mybot", "name": "My Bot", "bin": "mybot"},
     }
 
     def _resolve(self, spec):
-        return None if spec["bin"] == "gemini" else "/fake/bin/" + os.path.basename(spec["bin"])
+        return None if spec["bin"] == "ghostbot" else "/fake/bin/" + os.path.basename(spec["bin"])
 
     def _patched(self, run_mock, specs=None):
         stack = contextlib.ExitStack()
@@ -328,7 +328,7 @@ class TestNative(UsageBase):
         self.assertIn("Native usage reports", out)
         self.assertIn("Weekly allowance: 80% left", out)
         self.assertIn("no usage command", out)
-        self.assertIn("not installed", out)  # gemini
+        self.assertIn("not installed", out)  # ghostbot
 
     def test_every_run_command_comes_from_verified_dict(self):
         seen = []
@@ -346,7 +346,7 @@ class TestNative(UsageBase):
         for name in ("claude", "codex", "agy", "mybot"):
             self.assertIsNone(native[name]["command"])
             self.assertEqual(native[name]["note"], "no usage command")
-        self.assertEqual(native["gemini"]["note"], "not installed")
+        self.assertEqual(native["ghostbot"]["note"], "not installed")
         self.assertIn("hint", native["claude"])
 
     def test_json_native_shape(self):

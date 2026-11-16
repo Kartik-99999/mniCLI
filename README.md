@@ -86,7 +86,7 @@ omnicli pr --dir ./todo-app --base main --draft
 
 ### 0. 🤝 AI Team Mode (`omnicli team`) — one command, many AI CLIs
 Give one goal. A **lead** AI CLI plans the project and directs the **other AI CLIs** on your device
-(`claude`, `codex`, `agy`, `muse`, `gemini`, …) until it is done:
+(`claude`, `codex`, `agy`, `muse`, …) until it is done:
 
 ```
 you ──1 command──▶ LEAD (e.g. claude) ── plan: tasks + who does what + how to verify
@@ -135,7 +135,7 @@ How it behaves:
     "claude": {"strengths": "my backend expert"},
     "mybot": {"name": "My Bot", "bin": "mybot", "readonly": ["ask", "{prompt}"], "edit": ["do", "--dir", "{dir}", "{prompt}"]}
   },
-  "disabled": ["gemini"]
+  "disabled": ["agy"]
 }
 ```
 
@@ -257,7 +257,7 @@ OmniCLI scans system `$PATH` and local binary directories (`/opt/homebrew/bin`, 
 - **Containers & Cloud:** `docker`, `docker-compose`, `colima`, `podman`, `kubectl`, `helm`, `aws`
 - **Build & Tasks:** `make`, `cmake`, `gradle`, `mvn`, `npx`
 - **Testers & Linters:** `pytest`, `eslint`, `prettier`, `ruff`, `black`, `tsc`
-- **AI Agents:** `claude`, `codex`, `agy`, `gemini`, `higgsfield`, `kiro-cli`
+- **AI Agents:** `claude`, `codex`, `agy`, `muse`, `higgsfield`, `kiro-cli`
 - **Utilities:** `curl`, `wget`, `jq`, `openssl`, `ssh`, `rsync`, `tar`, `zip`
 
 ```bash
@@ -363,7 +363,7 @@ omnicli/
 │   └── omnicli              # Global CLI runner script (shebang python3)
 ├── omnicli/
 │   ├── cli.py               # Main CLI entrypoint & subcommands
-│   ├── agents.py            # AI CLI adapters (claude/codex/agy/muse/gemini), headless runs, health checks
+│   ├── agents.py            # AI CLI adapters (claude/codex/agy/muse), headless runs, health checks
 │   ├── conductor.py         # Team mode: lead plans → workers build → verify → review → checkpoint → final check
 │   ├── teamopts.py          # Flags + saved-settings mapping shared by team / resume / continue
 │   ├── model_catalog.py     # Each AI CLI's available models (from the CLI itself) + validation

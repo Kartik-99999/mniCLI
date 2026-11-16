@@ -138,12 +138,12 @@ class TestHelpers(unittest.TestCase):
             cfg = Path(d) / "agents.json"
             cfg.write_text(json.dumps({"agents": {"claude": {"strengths": "custom"},
                                                   "mybot": {"bin": "mybot", "edit": ["{prompt}"]}},
-                                       "disabled": ["gemini"]}))
+                                       "disabled": ["agy"]}))
             specs = ag.load_agent_specs(cfg)
             self.assertEqual(specs["claude"]["strengths"], "custom")
             self.assertEqual(specs["claude"]["bin"], "claude")
             self.assertIn("mybot", specs)
-            self.assertNotIn("gemini", specs)
+            self.assertNotIn("agy", specs)
 
 
 class TestConductorEndToEnd(unittest.TestCase):

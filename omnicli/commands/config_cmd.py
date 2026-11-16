@@ -61,14 +61,14 @@ AGENTS_TEMPLATE: Dict[str, Any] = {
     "disabled": [],
     "_help": [
         "OmniCLI agent overrides. Only the 'agents' and 'disabled' keys are read; keys starting with _ are ignored.",
-        "Built-in agents: claude, codex, agy, muse, gemini (run `omnicli agents` to see them and their health).",
+        "Built-in agents: claude, codex, agy, muse (run `omnicli agents` to see them and their health).",
         "Override part of a built-in agent: \"agents\": {\"claude\": {\"strengths\": \"careful reviews, refactors\"}}",
-        "Change the flags an agent runs with: \"agents\": {\"gemini\": {\"edit\": [\"-p\", \"{prompt}\", \"--approval-mode\", \"auto_edit\"]}}",
+        "Change the flags an agent runs with: \"agents\": {\"agy\": {\"edit\": [\"-p\", \"{prompt}\", \"--mode\", \"accept-edits\"]}}",
         "  'readonly' = lead plan/review (must not modify files), 'edit' = worker build mode.",
         "  Placeholders: {prompt} (the prompt text), {prompt_file} (path to a file holding it), {dir} (project dir).",
         "Add a custom agent: \"agents\": {\"mybot\": {\"name\": \"My Bot\", \"bin\": \"mybot\", \"strengths\": \"python scripts\",",
         "  \"readonly\": [\"ask\", \"{prompt}\"], \"edit\": [\"do\", \"--yes-edits\", \"{prompt}\"]}}",
-        "Hide an agent from team mode: \"disabled\": [\"gemini\"]",
+        "Hide an agent from team mode: \"disabled\": [\"agy\"]",
         "A full example is in '_example' below: copy its entries into 'agents' / 'disabled' to use them.",
     ],
     "_example": {
@@ -82,7 +82,7 @@ AGENTS_TEMPLATE: Dict[str, Any] = {
                 "edit": ["do", "--workspace", "{dir}", "{prompt_file}"],
             },
         },
-        "disabled": ["gemini"],
+        "disabled": ["agy"],
     },
 }
 

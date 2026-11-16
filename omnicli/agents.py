@@ -1,7 +1,7 @@
 """
 AI agent adapters for OmniCLI team mode.
 
-Every AI coding CLI on the device (claude, codex, agy, muse, gemini, ...) is wrapped
+Every AI coding CLI on the device (claude, codex, agy, muse, ...) is wrapped
 in a small adapter that knows how to run it headlessly in two modes:
 
   * "readonly" - used by the LEAD to plan and review. Must not modify files.
@@ -19,7 +19,7 @@ Adapters are plain dicts so users can override or add agents in
         "mybot":  {"name": "My Bot", "bin": "mybot",
                    "readonly": ["ask", "{prompt}"], "edit": ["do", "{prompt}"]}
       },
-      "disabled": ["gemini"]
+      "disabled": ["agy"]
     }
 
 Argument templates understand {prompt}, {prompt_file} and {dir}.
@@ -83,11 +83,12 @@ CLAUDE_WORKER_TOOLS = ",".join(
 # Antigravity takes session-only settings; command(<cmd>) allow-rules (verified with agy 1.5.9).
 AGY_WORKER_SETTINGS = json.dumps({"permissions": {"allow": [f"command({c})" for c in WORKER_DEV_COMMANDS]}})
 
-PREFERRED_LEAD_ORDER = ["claude", "codex", "agy", "muse", "gemini"]
+PREFERRED_LEAD_ORDER = ["claude", "codex", "agy", "muse"]
 
 # model/effort/add-dir flags below were each checked against the CLI's own --help on
 # 2026-11-15: claude 2.1.325, codex-cli 0.163.0 (`codex exec --help`), agy 1.5.9,
-# muse 1.4.20 (`muse exec --help`). gemini is not installed here, so it gets none.
+# muse 1.4.20 (`muse exec --help`). (Google discontinued Gemini CLI; Gemini models remain
+# available through Antigravity - see `agy models`.)
 BUILTIN_AGENTS: Dict[str, Dict] = {
     "claude": {
         "name": "Claude Code",
@@ -148,15 +149,6 @@ BUILTIN_AGENTS: Dict[str, Dict] = {
         # `muse exec --help`: --image <PATH>  Attach a local image file (repeatable)
         "image_args": ["--image", "{image}"],
         "sees_images": True,   # verified 2026-11-15
-    },
-    "gemini": {
-        "name": "Gemini CLI",
-        "vendor": "google",
-        "bin": "gemini",
-        "strengths": "general coding, large-context code reading, documentation",
-        "readonly": ["-p", "{prompt}"],
-        "edit": ["-p", "{prompt}", "--approval-mode", "auto_edit"],
-        # model/effort/add-dir flags unverified (gemini is not installed on this machine), so none are set
     },
 }
 

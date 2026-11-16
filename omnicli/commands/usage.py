@@ -40,7 +40,6 @@ GROUP_KEYS = ("agent", "kind", "run", "day")
 #                turn)" and documents `--json` ("Print one JSON object").
 #   claude 2.1.325, codex-cli 0.163.0, agy 1.5.9: `--help` lists no usage/quota/cost
 #                subcommand -> deliberately absent ("no usage command").
-#   gemini: not installed here, so nothing could be verified -> absent.
 # "bin" must match the resolved executable's basename, so a user adapter that reuses
 # one of these ids for a different program is never sent these arguments.
 NATIVE_USAGE_COMMANDS: Dict[str, Dict] = {

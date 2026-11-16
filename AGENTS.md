@@ -1,6 +1,6 @@
 # AGENTS.md — guide for AI coding agents working on OmniCLI
 
-OmniCLI connects the AI coding CLIs on this Mac (claude, codex, agy, muse, gemini) into one team:
+OmniCLI connects the AI coding CLIs on this Mac (claude, codex, agy, muse) into one team:
 `omnicli team "<goal>"` → a **lead** AI plans tasks → **worker** AIs build them → OmniCLI runs each
 task's verify command → the lead reviews (approve / revise) → git checkpoint per task → final check.
 `omnicli` with no arguments opens a chatbot (`omnicli/commands/chat.py`).

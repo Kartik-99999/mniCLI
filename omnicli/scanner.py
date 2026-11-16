@@ -77,7 +77,6 @@ KNOWN_TOOLS = [
     ("agy", CliCategory.AI, "--version", "Google Antigravity CLI", ["AGY"]),
     ("AGY", CliCategory.AI, "--version", "Google Antigravity CLI Binary", ["agy"]),
     ("muse", CliCategory.AI, "--version", "Muse Code terminal coding agent", []),
-    ("gemini", CliCategory.AI, "--version", "Google Gemini CLI", []),
     ("higgsfield", CliCategory.AI, "--version", "Higgsfield AI Generative Studio CLI", []),
     ("kiro-cli", CliCategory.AI, "--version", "Kiro CLI Agent", []),
     # Network & Utilities

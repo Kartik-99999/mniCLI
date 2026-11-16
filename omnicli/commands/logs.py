@@ -38,7 +38,7 @@ _SUFFIXES = ((".prompt.md", "prompt"), (".stderr.log", "stderr"), (".md", "outpu
 _SUFFIX_FOR = {stream: suffix for suffix, stream in _SUFFIXES}
 STREAM_LABEL = {"output": "output", "prompt": "prompt", "stderr": "stderr"}
 
-DEFAULT_AGENTS = ("claude", "codex", "agy", "muse", "gemini")
+DEFAULT_AGENTS = ("claude", "codex", "agy", "muse")
 KNOWN_LEAD_KINDS = ("plan", "review", "final")
 
 _LEAD_RE = re.compile(r"^lead-(\d+)-(.+)$")

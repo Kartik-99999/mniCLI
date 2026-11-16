@@ -114,7 +114,8 @@ class TestBuildCommandOptions(unittest.TestCase):
         self.assertNotIn("--add-dir", muse)  # muse exec has no --add-dir equivalent
 
     def test_unsupported_adapter_gets_nothing(self):
-        s = self.spec("gemini", _model="g", _effort="high", _add_dirs=["/x"])
+        s = {"id": "plain", "bin": sys.executable, "edit": ["-p", "{prompt}", "--approval-mode", "auto_edit"],
+             "_model": "g", "_effort": "high", "_add_dirs": ["/x"]}  # an adapter with no option flags
         self.assertEqual(ag.build_command(s, "edit", "P", "/p")[1:], ["-p", "P", "--approval-mode", "auto_edit"])
         bare = {"bin": sys.executable, "edit": ["-p", "{prompt}", "--cwd={dir}"]}
         self.assertEqual(ag.build_command(bare, "edit", "do it", "/tmp/x")[1:], ["-p", "do it", "--cwd=/tmp/x"])

@@ -51,7 +51,6 @@ CHECK_NOTICE = ("Pinging each installed AI CLI with one tiny prompt (\"reply PON
 LOGIN_HINTS = {
     "claude": "run `claude` and log in with /login",
     "codex": "run `codex login`",
-    "gemini": "run `gemini` once and sign in",
 }
 _AUTH_WORDS = ("not logged in", "auth", "login", "log in", "logged in", "sign in", "unauthorized", "401",
                "api key", "token")
@@ -365,7 +364,7 @@ def check_agents_config() -> List[Check]:
     disabled = cfg.get("disabled") or []
     if not isinstance(disabled, list):
         out.append(Check(WARN, "agents.json", f"\"disabled\" must be a list of agent names, not {type(disabled).__name__}",
-                         f"e.g. \"disabled\": [\"gemini\"] in {shown}"))
+                         f"e.g. \"disabled\": [\"agy\"] in {shown}"))
         disabled = []
     out.insert(0, Check(PASS, "agents.json", f"valid ({_plural(len(overrides), 'override')}, {len(disabled)} disabled)"))
 
