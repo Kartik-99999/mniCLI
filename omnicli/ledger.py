@@ -23,6 +23,8 @@ Entry fields (all written by agents.run_agent):
 """
 
 import json
+from pathlib import Path
+import re
 import threading
 import time
 from typing import Dict, Iterable, List, Optional
@@ -211,19 +213,39 @@ def active_quota_resets(now: Optional[float] = None) -> Dict[str, Dict]:
             if isinstance(item, dict) and float(item.get("reset_at", 0) or 0) > current}
 
 
-def record_team_lesson(lesson: str, category: str = "other", source: str = "") -> None:
-    """Store a short reusable lesson without retaining prompts, diffs, or logs."""
-    text = " ".join(str(lesson or "").split())[:300]
+_PATH_RE = re.compile(r"(?:~|/(?:Users|home|private|var|tmp|opt|etc|Volumes|mnt|root))(?:/[^\s'\"`),;]*)+")
+_EMAIL_RE = re.compile(r"[\w.+-]+@[\w-]+\.[\w.-]+")
+_TOKENISH_RE = re.compile(r"\b[A-Za-z0-9_\-]{32,}\b")
+
+
+def sanitize_lesson(text: str) -> str:
+    """Lessons are reused in later prompts: strip file paths, emails and key-like strings."""
+    text = _PATH_RE.sub("<path>", str(text or ""))
+    text = _EMAIL_RE.sub("<email>", text)
+    return _TOKENISH_RE.sub("<redacted>", text)
+
+
+def _project_key(project) -> str:
+    try:
+        return str(Path(project).expanduser().resolve()) if project else ""
+    except Exception:
+        return str(project or "")
+
+
+def record_team_lesson(lesson: str, category: str = "other", source: str = "", project: str = "") -> None:
+    """Store a short reusable lesson (sanitized, tagged with its project) without prompts, diffs or logs."""
+    text = " ".join(sanitize_lesson(lesson).split())[:300]
     if not text:
         return
+    proj = _project_key(project)
     item = {"ts": time.time(), "category": category if category in SKILL_CATEGORIES else "other",
-            "lesson": text, "source": str(source or "")[:80]}
+            "lesson": text, "source": str(source or "")[:80], "project": proj}
     try:
         path = team_memory_path()
         path.parent.mkdir(parents=True, exist_ok=True)
         with _lock:
-            known = {row["lesson"].lower() for row in read_team_memory()}
-            if text.lower() in known:
+            known = {(row.get("project", ""), row["lesson"].lower()) for row in read_team_memory()}
+            if (proj, text.lower()) in known:
                 return
             with open(path, "a", encoding="utf-8") as fh:
                 fh.write(json.dumps(item, ensure_ascii=False) + "\n")
@@ -231,10 +253,21 @@ def record_team_lesson(lesson: str, category: str = "other", source: str = "") -
         pass
 
 
-def read_team_memory(category: Optional[str] = None) -> List[Dict]:
+def read_team_memory(category: Optional[str] = None, project: Optional[str] = None) -> List[Dict]:
+    """All lessons (category-filtered). With `project`, only lessons that may be used there:
+    that project's own lessons, or every lesson when the user chose `memory_scope` = global."""
     path = team_memory_path()
     if not path.exists():
         return []
+    scope_project = None
+    if project is not None:
+        try:
+            from omnicli import settings
+            scope = str(settings.get("memory_scope") or "project").lower()
+        except Exception:
+            scope = "project"
+        if scope != "global":
+            scope_project = _project_key(project)
     items = []
     try:
         with open(path, encoding="utf-8", errors="replace") as fh:
@@ -243,8 +276,13 @@ def read_team_memory(category: Optional[str] = None) -> List[Dict]:
                     row = json.loads(line)
                 except ValueError:
                     continue
-                if isinstance(row, dict) and row.get("lesson") and (not category or row.get("category") == category):
-                    items.append(row)
+                if not (isinstance(row, dict) and row.get("lesson")):
+                    continue
+                if category and row.get("category") != category:
+                    continue
+                if scope_project is not None and row.get("project", "") != scope_project:
+                    continue
+                items.append(row)
     except OSError:
         return []
     return items

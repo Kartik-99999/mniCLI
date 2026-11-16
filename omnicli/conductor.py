@@ -51,7 +51,12 @@ IGNORE_DIRS = {
 }
 # Kept out of checkpoints via .git/info/exclude (local only; the project's .gitignore is untouched).
 GIT_EXCLUDES = [".omnicli/", "node_modules/", ".venv/", "venv/", "__pycache__/", "*.pyc",
-                ".pytest_cache/", ".mypy_cache/", ".ruff_cache/", ".next/", ".DS_Store"]
+                ".pytest_cache/", ".mypy_cache/", ".ruff_cache/", ".next/", ".DS_Store",
+                # never let a checkpoint commit secrets that happen to sit in the project folder
+                ".env", ".env.*", "!.env.example", "!.env.sample", "!.env.template",
+                "*.pem", "*.key", "*.p12", "*.pfx", "*.keystore", "*.jks", "id_rsa*", "id_ecdsa*", "id_ed25519*",
+                ".ssh/", ".aws/", ".npmrc", ".pypirc", ".netrc", "credentials.json", "service-account*.json",
+                "*.tfstate", "*.tfstate.*"]
 PROBE_TOOLS = ["python3", "pip3", "pytest", "node", "npm", "npx", "pnpm", "yarn", "bun", "deno",
                "go", "cargo", "java", "mvn", "gradle", "make", "docker", "ruby", "php", "swift"]
 SUMMARY_MARKER = "=== SUMMARY ==="
@@ -70,6 +75,7 @@ class Task:
     owns: List[str] = field(default_factory=list)
     acceptance: str = ""
     verify: str = ""
+    verify_note: str = ""   # why a planned verify command was refused (shown to the user)
     category: str = "other"
     round: int = 1
     status: str = "pending"  # pending | running | done | failed | skipped
@@ -224,6 +230,7 @@ def normalize_tasks(
             owns=owns,
             acceptance=str(raw.get("acceptance") or raw.get("acceptance_criteria") or "").strip(),
             verify=str(raw.get("verify") or "").strip(),
+            verify_note="",
             category=(str(raw.get("category") or "").strip().lower()
                       if str(raw.get("category") or "").strip().lower() in ledger.SKILL_CATEGORIES
                       else classify_task(" ".join((title, str(raw.get("instructions") or raw.get("description") or ""),
@@ -248,6 +255,17 @@ def normalize_tasks(
         for t in ready:
             resolved.add(t.id)
             remaining.remove(t)
+
+    # verify commands run on the user's machine: drop any that aren't plain test invocations
+    from omnicli import settings as _settings
+    from omnicli.safecmd import verify_allowed
+    policy = _settings.get("verify_policy")
+    for t in tasks:
+        if t.verify:
+            ok, why = verify_allowed(t.verify, policy)
+            if not ok:
+                t.verify_note = f"`{t.verify}` {why}"
+                t.verify = ""
     return tasks
 
 
@@ -417,9 +435,13 @@ RULES:
 - depends_on: ids of tasks that must finish first.
 - owns: the files/directories the task will create or modify (relative paths). Tasks that could run at the same time
   must not share paths. Use [] if the task touches many places - it will then run alone.
-- verify: optional shell command that exits 0 only when the task is done correctly, using installed tools
-  (e.g. "python3 -m pytest -q"). Use "" when no automated check makes sense. Never put package installs,
-  servers that keep running, network calls or destructive commands in verify.
+- verify: optional command that exits 0 only when the task is done correctly, using installed tools
+  (e.g. "python3 -m unittest -v test_app" or "npm test"). Use "" when no automated check makes sense.
+  It runs on the user's machine, so it MUST be a plain test invocation: a test/build tool or read-only
+  check (test, grep, diff), joined only with && or ||, piping only into grep/head/tail/wc. No inline code
+  (no python -c / node -e - put checks in a test file), no $ or $(...), no ;, no {...} groups, no
+  redirects except >/dev/null, no paths outside the project, no installs, servers, network or deletes.
+  Commands that break these rules are dropped and the task gets no automated check.
 - If the goal asks for a tool that is NOT installed (e.g. pytest), still deliver what was asked, but make it runnable
   with what IS installed - e.g. write tests as unittest.TestCase classes (pytest runs those too) and verify with
   `python3 -m unittest` - and mention the missing tool in the README's setup section.
@@ -876,12 +898,36 @@ class Conductor:
             self._git_ident = ["-c", "user.name=OmniCLI", "-c", "user.email=omnicli@localhost"]
         has_head = self._git("rev-parse", "--verify", "-q", "HEAD").returncode == 0
         dirty = bool(self._git("status", "--porcelain", "--", ".").stdout.strip())
-        if created or not has_head:
-            if dirty:
-                self._git("add", "-A", "--", ".")
-                self._git(*self._git_ident, "commit", "-q", "-m", "omnicli: baseline before team run")
-        elif dirty:
-            self.say(f"{BADGE_WARN} {self.dir} has uncommitted changes; they will be folded into the first task checkpoint.")
+        if dirty:
+            files = [line[len("add '"):-1] if line.startswith("add '") else line
+                     for line in self._git("add", "-A", "--dry-run", "--", ".").stdout.splitlines() if line.strip()]
+            if created or not has_head:
+                question = (f"OmniCLI saves a git checkpoint after every task. To start, it would commit these "
+                            f"{len(files)} existing file(s) as a baseline:")
+            else:
+                question = (f"{self.dir} has {len(files)} uncommitted change(s). OmniCLI would commit them as a "
+                            "baseline before the team starts:")
+            self.say(question)
+            for f in files[:20]:
+                self.say(f"  {f}")
+            if len(files) > 20:
+                self.say(c_dim(f"  ... and {len(files) - 20} more"))
+            if not self.cfg.auto_approve and not self._ask_yes_no("Commit them as a baseline?"):
+                self.git = False
+                if created:
+                    shutil.rmtree(self.dir / ".git", ignore_errors=True)  # only the repo we just made
+                self.say(f"{BADGE_INFO} No git checkpoints this run (nothing was committed). "
+                         "Use --no-git to skip this question next time.")
+                return
+            self._git("add", "-A", "--", ".")
+            self._git(*self._git_ident, "commit", "-q", "-m", "omnicli: baseline before team run")
+
+    def _ask_yes_no(self, question: str) -> bool:
+        try:
+            ans = self.input_fn(c_bold(c_yellow(question + " [y/N]: "))).strip().lower()
+        except (KeyboardInterrupt, EOFError):
+            return False
+        return ans in ("y", "yes")
 
     def _changed_files(self, scope: Optional[List[str]]) -> List[str]:
         self._git("add", "-A", "--", ".")
@@ -1212,10 +1258,19 @@ class Conductor:
                 c_bold(t.id), c_cyan(t.assignee), t.title[:58],
                 ",".join(t.depends_on) or "-",
                 (", ".join(t.owns)[:28] or c_dim("(runs alone)")),
-                (t.verify[:34] or c_dim("-")),
+                (t.verify[:34] + ("…" if len(t.verify) > 34 else "") if t.verify else c_dim("-")),
             ])
         if self.verbose:
             print_table(["ID", "Worker", "Task", "After", "Owns", "Verify"], rows, title=title)
+            checks = [t for t in tasks if t.verify]
+            if checks:
+                self.say(c_bold("Commands that will run on your machine to check tasks:"))
+                for t in checks:
+                    self.say(f"  {c_bold(t.id)}  {t.verify}")
+            for t in tasks:
+                if t.verify_note:
+                    self.say(f"{BADGE_WARN} {t.id}: the lead's check command was dropped ({t.verify_note}); "
+                             "the lead will review this task by reading the code.")
 
     def confirm(self) -> bool:
         if self.cfg.auto_approve:
@@ -1468,6 +1523,13 @@ class Conductor:
         """(exit code, output tail, missing-dependency explanation or '')."""
         if not t.verify:
             return None
+        # checked again here: state.json could have been edited after planning
+        from omnicli import settings as _settings
+        from omnicli.safecmd import verify_allowed
+        ok, why = verify_allowed(t.verify, _settings.get("verify_policy"))
+        if not ok:
+            self.say(f"{BADGE_WARN} {t.id}: not running check `{t.verify}`: it {why}")
+            return None
         try:
             r = subprocess.run(t.verify, shell=True, cwd=str(cwd or self.dir), capture_output=True, text=True,
                                timeout=600, stdin=subprocess.DEVNULL, env=ag.agent_env())
@@ -1521,7 +1583,7 @@ class Conductor:
                                          feedback=feedback, revision=revision,
                                          previous_agents=[a for a in tried if a != agent],
                                          extra_dirs=spec.get("_add_dirs") or None,
-                                         team_memory=ledger.read_team_memory(t.category))
+                                         team_memory=ledger.read_team_memory(t.category, project=str(self.dir)))
 
             def on_line(line: str, _label=label, _tid=t.id):
                 with self.lock:
@@ -1649,7 +1711,7 @@ class Conductor:
             attempt.update({"result": "approved" if approved else "revise", "feedback": feedback,
                             "files_changed": len(files), "verify_exit": verify[0] if verify else None})
             if not approved and feedback:
-                ledger.record_team_lesson(feedback, category=t.category, source=t.id)
+                ledger.record_team_lesson(feedback, category=t.category, source=t.id, project=str(self.dir))
             with self.lock:
                 t.attempts.append(attempt)
 
@@ -1776,7 +1838,6 @@ class Conductor:
 
         if not self.select_team():
             return 1
-        self.setup_git()
 
         try:
             if not resumed or not self.tasks:
@@ -1806,6 +1867,7 @@ class Conductor:
                 if self.cfg.plan_only:
                     return 0
 
+            self.setup_git()  # after approval: nothing is created or committed for a plan you decline
             self.phase = "running"
             self.save_state()
             while True:

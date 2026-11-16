@@ -150,7 +150,7 @@ class TestConductorEndToEnd(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp())
         self.proj = self.tmp / "proj"
-        os.environ["FAKE_STATE"] = str(self.tmp / "state")
+        os.environ["OMNICLI_FAKE_STATE"] = str(self.tmp / "state")
 
     def tearDown(self):
         shutil.rmtree(self.tmp, ignore_errors=True)

@@ -31,6 +31,9 @@ SCHEMA: Dict[str, tuple] = {
     "max_minutes": (float, 0.0, "stop a run after this many minutes (0 = no limit)"),
     "models": (dict, {}, "per-agent model, e.g. models.claude=opus"),
     "effort": (dict, {}, "per-agent reasoning effort, e.g. effort.agy=high"),
+    "verify_policy": (str, "strict", "strict = only plain test commands may run as checks; trust = run any (unsafe)"),
+    "env_passthrough": (list, None, "extra environment variables AI tools may see, e.g. AWS_PROFILE,MY_TOKEN"),
+    "memory_scope": (str, "project", "project = lessons stay in their project; global = shared across projects"),
 }
 
 _TRUE = {"1", "true", "yes", "on", "y"}

@@ -11,8 +11,8 @@ Modes:
   silent    exits 0 with no output, like agy when a tool is auto-denied headlessly
   limited   fails like claude after its plan usage cap ("You've hit your 5-hour limit")
   recorder  like good, but first appends its extra argv (after <prompt_file>) and the
-            prompt kind to $FAKE_STATE/argv.jsonl - lets tests see model/effort/add-dir flags
-State (counters) lives in $FAKE_STATE.
+            prompt kind to $OMNICLI_FAKE_STATE/argv.jsonl - lets tests see model/effort/add-dir flags
+State (counters) lives in $OMNICLI_FAKE_STATE.
 """
 
 import json
@@ -25,7 +25,7 @@ FILES = {"t1": "a/a.txt", "t2": "b/b.txt", "t3": "README.md"}
 
 
 def bump(name: str) -> int:
-    d = Path(os.environ.get("FAKE_STATE", "."))
+    d = Path(os.environ.get("OMNICLI_FAKE_STATE", "."))
     d.mkdir(parents=True, exist_ok=True)
     f = d / name
     n = int(f.read_text()) if f.exists() else 0
@@ -39,7 +39,7 @@ def main():
 
     if mode == "recorder":
         kind = re.search(r"\[OmniCLI team - ([a-z ]+)\]", prompt)
-        d = Path(os.environ.get("FAKE_STATE", "."))
+        d = Path(os.environ.get("OMNICLI_FAKE_STATE", "."))
         d.mkdir(parents=True, exist_ok=True)
         with open(d / "argv.jsonl", "a", encoding="utf-8") as fh:
             fh.write(json.dumps({"kind": kind.group(1) if kind else "other", "args": sys.argv[3:]}) + "\n")

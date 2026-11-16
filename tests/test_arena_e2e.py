@@ -31,7 +31,7 @@ class TestArenaEndToEnd(unittest.TestCase):
         tmp = Path(tempfile.mkdtemp(prefix="omni-arena-"))
         judge = tmp / "judge.py"
         judge.write_text('print(\'Candidate A is better.\\n{"winner": "A", "reason": "passes"}\')\n')
-        os.environ["FAKE_STATE"] = str(tmp / "fake-state")
+        os.environ["OMNICLI_FAKE_STATE"] = str(tmp / "fake-state")
 
         def worker(mode):
             return {"name": "Fake " + mode, "bin": sys.executable, "strengths": "tests", "vendor": mode,

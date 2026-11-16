@@ -60,7 +60,7 @@ class SessionsBase(unittest.TestCase):
         self.tmp = Path(tempfile.mkdtemp(prefix="omni-sessions-")).resolve()
         self._old_home = os.environ.get("OMNICLI_HOME")
         os.environ["OMNICLI_HOME"] = str(self.tmp / "home")
-        os.environ["FAKE_STATE"] = str(self.tmp / "fake-state")
+        os.environ["OMNICLI_FAKE_STATE"] = str(self.tmp / "fake-state")
         self.cfgs = []
 
         def factory(cfg):

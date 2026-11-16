@@ -22,7 +22,10 @@ def handler(args):
     elif not rows:
         print("No team lessons saved yet. Lessons from review revisions will appear here.")
     else:
-        print_table(["Category", "Lesson"], [[c_bold(row.get("category", "other")), row.get("lesson", "")]
-                                               for row in rows], title="Team memory")
-        print(c_dim("Stored locally in ~/.omnicli/team_memory.jsonl."))
+        from pathlib import Path
+        print_table(["Category", "Project", "Lesson"],
+                    [[c_bold(row.get("category", "other")), Path(row["project"]).name if row.get("project") else c_dim("(none)"),
+                      row.get("lesson", "")] for row in rows], title="Team memory")
+        print(c_dim("Stored locally in ~/.omnicli/team_memory.jsonl. Lessons are reused only in their own project "
+                    "(share them everywhere with: omnicli config set memory_scope global)."))
     return 0

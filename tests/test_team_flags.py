@@ -43,7 +43,7 @@ class HomeIsolated(unittest.TestCase):
         self.tmp = Path(tempfile.mkdtemp(prefix="omni-flags-"))
         self._old_home = os.environ.get("OMNICLI_HOME")
         os.environ["OMNICLI_HOME"] = str(self.tmp / "home")
-        os.environ["FAKE_STATE"] = str(self.tmp / "fake")
+        os.environ["OMNICLI_FAKE_STATE"] = str(self.tmp / "fake")
         self.proj = self.tmp / "proj"
 
     def tearDown(self):

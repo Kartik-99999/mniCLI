@@ -99,7 +99,7 @@ class ReviewBase(unittest.TestCase):
         (self.proj / "app.py").write_text("def main(xs):\n    return xs[0]\n", encoding="utf-8")
         (self.proj / "README.md").write_text("# Demo app\nRun with python3 app.py\n", encoding="utf-8")
         (self.proj / "pyproject.toml").write_text("[project]\nname = 'demo'\n", encoding="utf-8")
-        env = mock.patch.dict(os.environ, {"OMNICLI_HOME": str(self.home), "FAKE_STATE": str(self.tmp / "fake-state")})
+        env = mock.patch.dict(os.environ, {"OMNICLI_HOME": str(self.home), "OMNICLI_FAKE_STATE": str(self.tmp / "fake-state")})
         env.start()
         self.addCleanup(env.stop)
         self.patch(ui, "USE_COLOR", False)

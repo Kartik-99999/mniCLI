@@ -153,7 +153,7 @@ class TestCoreHardening(FoundationBase):
         self.assertEqual(r.output.strip(), "PONG")
 
     def test_usage_capped_agent_is_dropped_for_the_run(self):
-        os.environ["FAKE_STATE"] = str(self.home / "fake")
+        os.environ["OMNICLI_FAKE_STATE"] = str(self.home / "fake")
         proj = self.home / "capped"
         def spec(n, mode):
             return {"id": n, "name": n, "bin": sys.executable, "strengths": "t",
@@ -196,6 +196,50 @@ class TestCoreHardening(FoundationBase):
         no_verify = build_red_team_prompt(Task(id="t2", title="y", assignee="a", instructions="x"), Path("/w"))
         self.assertIn("no automated check command", no_verify)
 
+    def _git_project(self, name):
+        proj = self.home / name
+        proj.mkdir()
+        (proj / "app.py").write_text("print('hi')\n")
+        (proj / ".env").write_text("SECRET=1\n")
+        (proj / ".env.example").write_text("SECRET=\n")
+        (proj / "deploy.pem").write_text("key\n")
+        return proj
+
+    def _conductor(self, proj, answers, auto=False):
+        it = iter(answers)
+        return Conductor(TeamConfig(goal="g", project_dir=proj, auto_approve=auto), specs={}, health={},
+                         verbose=False, input_fn=lambda _p="": next(it))
+
+    def test_declining_baseline_creates_and_commits_nothing(self):
+        proj = self._git_project("decline")
+        c = self._conductor(proj, ["n"])
+        c.setup_git()
+        self.assertFalse(c.git)
+        self.assertFalse((proj / ".git").exists())
+
+    def test_baseline_never_includes_secret_files(self):
+        import subprocess
+        proj = self._git_project("accept")
+        c = self._conductor(proj, ["y"])
+        c.setup_git()
+        self.assertTrue(c.git)
+        tracked = subprocess.run(["git", "ls-files"], cwd=proj, capture_output=True, text=True).stdout.split()
+        self.assertIn("app.py", tracked)
+        self.assertIn(".env.example", tracked)
+        self.assertNotIn(".env", tracked)
+        self.assertNotIn("deploy.pem", tracked)
+
+    def test_declined_plan_never_touches_git(self):
+        os.environ["OMNICLI_FAKE_STATE"] = str(self.home / "fake-decline")
+        proj = self._git_project("plan-declined")
+        spec = {"id": "alpha", "name": "Fake", "bin": sys.executable, "strengths": "t",
+                "readonly": [FAKE, "good", "{prompt_file}"], "edit": [FAKE, "good", "{prompt_file}"]}
+        it = iter(["n"])
+        c = Conductor(TeamConfig(goal="g", project_dir=proj, lead="alpha"), specs={"alpha": spec},
+                      health={"alpha": {"installed": True, "ok": True}}, verbose=False, input_fn=lambda _p="": next(it))
+        self.assertEqual(c.run(), 0)
+        self.assertFalse((proj / ".git").exists())
+
     def test_banner_never_printed_into_pipes_or_json(self):
         import contextlib, io
         from omnicli import cli
@@ -216,7 +260,7 @@ class TestCommandPlugins(unittest.TestCase):
 
 class TestConductorBookkeeping(FoundationBase):
     def test_phase_and_registry_after_run(self):
-        os.environ["FAKE_STATE"] = str(self.home / "fake")
+        os.environ["OMNICLI_FAKE_STATE"] = str(self.home / "fake")
         proj = self.home / "proj"
         spec = {"id": "alpha", "name": "Fake", "bin": sys.executable, "strengths": "t",
                 "readonly": [FAKE, "good", "{prompt_file}"], "edit": [FAKE, "good", "{prompt_file}"]}

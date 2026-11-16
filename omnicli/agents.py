@@ -281,8 +281,50 @@ def build_command(spec: Dict, mode: str, prompt: str, cwd: str, prompt_file: Opt
     return [binary] + args
 
 
-def agent_env() -> Dict[str, str]:
-    env = {k: v for k, v in os.environ.items() if k not in _STRIP_ENV}
+# Environment allow-list. AI CLIs - and the project code they run - must not see unrelated secrets
+# (cloud keys, deploy tokens, SSH agent, a parent Claude Code session's messaging token...), so only
+# these pass through. Anything else: `omnicli config set env_passthrough NAME,...` or "env_passthrough"
+# on an adapter in ~/.omnicli/agents.json.
+_BASE_ENV = {
+    "PATH", "HOME", "USER", "LOGNAME", "SHELL", "LANG", "LANGUAGE", "TERM", "TERM_PROGRAM", "COLORTERM",
+    "TMPDIR", "TZ", "NO_COLOR", "FORCE_COLOR", "__CF_USER_TEXT_ENCODING",
+    # network plumbing (not credentials)
+    "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "no_proxy", "all_proxy",
+    "SSL_CERT_FILE", "SSL_CERT_DIR", "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE", "NODE_EXTRA_CA_CERTS",
+    # toolchain locations (not credentials)
+    "VIRTUAL_ENV", "CONDA_PREFIX", "CONDA_DEFAULT_ENV", "PYENV_ROOT", "PYENV_VERSION", "NVM_DIR", "NODE_PATH",
+    "GOPATH", "GOROOT", "GOBIN", "CARGO_HOME", "RUSTUP_HOME", "JAVA_HOME", "ANDROID_HOME", "HOMEBREW_PREFIX",
+    "HOMEBREW_CELLAR", "HOMEBREW_REPOSITORY", "SDKROOT", "DEVELOPER_DIR",
+    "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME", "XDG_STATE_HOME", "XDG_RUNTIME_DIR",
+}
+_BASE_PREFIXES = ("LC_", "OMNICLI_")
+# each AI CLI's own configuration/credentials: (exact names, prefixes)
+_AGENT_ENV = {
+    "claude": ({"CLAUDE_CONFIG_DIR", "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX"}, ("ANTHROPIC_",)),
+    "codex": ({"CODEX_HOME"}, ("OPENAI_",)),
+    "agy": ({"GOOGLE_CLOUD_PROJECT", "GOOGLE_APPLICATION_CREDENTIALS"}, ("GEMINI_", "ANTIGRAVITY_")),
+    "muse": (set(), ("MUSE_",)),
+}
+
+
+def agent_env(spec: Optional[Dict] = None) -> Dict[str, str]:
+    """Environment for a child process. With `spec`, that AI CLI's own variables are added;
+    without it (verify commands, version checks) no AI credentials are included."""
+    names = set(_BASE_ENV)
+    prefixes = list(_BASE_PREFIXES)
+    if spec:
+        extra_names, extra_prefixes = _AGENT_ENV.get(str(spec.get("id", "")), (set(), ()))
+        names |= set(extra_names)
+        prefixes += list(extra_prefixes)
+        names |= {str(n) for n in (spec.get("env_passthrough") or [])}
+    try:
+        from omnicli import settings
+        names |= {str(n) for n in (settings.get("env_passthrough") or [])}
+    except Exception:
+        pass
+    pre = tuple(prefixes)
+    env = {k: v for k, v in os.environ.items()
+           if (k in names or k.startswith(pre)) and k not in _STRIP_ENV}
     env.setdefault("NO_COLOR", "1")
     return env
 
@@ -436,7 +478,7 @@ def run_agent(
         proc = subprocess.Popen(
             cmd,
             cwd=cwd,
-            env=agent_env(),
+            env=agent_env(spec),
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=err_fh,

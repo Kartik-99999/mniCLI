@@ -125,8 +125,23 @@ How it behaves:
   with the same command allow-list passed via its session-only `--settings`,
   Muse's default sandbox). Nothing disables an agent's permission system. Workers are told never to install anything
   outside the project. Note that Muse's default sandbox *does* allow network access to package indexes, so for Muse that
-  rule is an instruction, not an enforced limit (in testing it once ran `pip install pytest` into the user's Python). `verify` commands come from the lead's plan and are shown to you before
-  anything runs — review the plan rather than using `-y` on goals you haven't seen planned.
+  rule is an instruction, not an enforced limit (in testing it once ran `pip install pytest` into the user's Python).
+- **Check commands are validated** – `verify` commands come from the lead AI, so before they run on your machine
+  they must be plain test invocations: a known test/build tool or read-only check, joined only with `&&`/`||`,
+  piping only into `grep`/`head`/…, no inline code (`python -c`), no `$`/`;`/sub-shells, no redirects except
+  `>/dev/null`, no paths outside the project. Anything else is dropped (the task is then reviewed by reading the
+  code) and every command that will run is shown in full with the plan. Opt out knowingly with
+  `omnicli config set verify_policy trust`. The tests themselves are still AI-written code — for untrusted projects
+  use a container or VM.
+- **No secrets leak to the AIs** – AI CLIs and the commands they run get an allow-listed environment: basics,
+  proxies/certificates, toolchain paths, and only *that* AI's own variables (`ANTHROPIC_*` for Claude, `OPENAI_*`
+  for Codex, …). Cloud keys, deploy tokens and your SSH agent are not passed. Add what a project needs with
+  `omnicli config set env_passthrough AWS_PROFILE,DATABASE_URL`.
+- **Git only after you approve** – the repository and checkpoints are set up after you accept the plan; existing
+  files are listed and you're asked before the baseline commit. `.env`, keys, certificates, `.npmrc`, cloud
+  credentials and Terraform state are always kept out of checkpoints.
+- **Team memory stays in its project** – lessons from reviews are stripped of paths, emails and key-like strings and
+  reused only in the project they came from (`omnicli config set memory_scope global` to share them).
 - **Customisable** – change strengths, flags or add any other AI CLI in `~/.omnicli/agents.json`:
 
 ```json
