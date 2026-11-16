@@ -440,7 +440,8 @@ RULES:
   It runs on the user's machine, so it MUST be a plain test invocation: a test/build tool or read-only
   check (test, grep, diff), joined only with && or ||, piping only into grep/head/tail/wc. No inline code
   (no python -c / node -e - put checks in a test file), no $ or $(...), no ;, no {...} groups, no
-  redirects except >/dev/null, no paths outside the project, no installs, servers, network or deletes.
+  redirects except >/dev/null, no paths outside the project, no glob patterns like *.py (commands run
+  without a shell, so nothing is expanded), no installs, servers, network or deletes.
   Commands that break these rules are dropped and the task gets no automated check.
 - If the goal asks for a tool that is NOT installed (e.g. pytest), still deliver what was asked, but make it runnable
   with what IS installed - e.g. write tests as unittest.TestCase classes (pytest runs those too) and verify with
@@ -1525,24 +1526,19 @@ class Conductor:
             return None
         # checked again here: state.json could have been edited after planning
         from omnicli import settings as _settings
-        from omnicli.safecmd import sandbox_argv, verify_allowed
+        from omnicli.safecmd import run_verify_command, verify_allowed
         run_dir = Path(cwd or self.dir)
         ok, why = verify_allowed(t.verify, _settings.get("verify_policy"), project_dir=run_dir)
         if not ok:
             self.say(f"{BADGE_WARN} {t.id}: not running check `{t.verify}`: it {why}")
             return None
-        argv = sandbox_argv(t.verify, run_dir) if _settings.get("verify_sandbox") else None
         try:
-            if argv:  # macOS: no network, no writes outside the project, no reads of secret folders
-                r = subprocess.run(argv, cwd=str(run_dir), capture_output=True, text=True,
-                                   timeout=600, stdin=subprocess.DEVNULL, env=ag.agent_env())
-            else:
-                r = subprocess.run(t.verify, shell=True, cwd=str(run_dir), capture_output=True, text=True,
-                                   timeout=600, stdin=subprocess.DEVNULL, env=ag.agent_env())
-            out = (r.stdout + ("\n" + r.stderr if r.stderr else "")).strip()
-            return r.returncode, out[-3000:], missing_dependency(r.returncode, out, self.dir)
-        except subprocess.TimeoutExpired:
-            return 124, "verify command timed out after 600s", ""
+            # strict: the checked argvs run WITHOUT a shell; on macOS each process is sandboxed
+            code, out = run_verify_command(t.verify, run_dir, env=ag.agent_env(), timeout=600,
+                                           policy=_settings.get("verify_policy"),
+                                           sandbox=bool(_settings.get("verify_sandbox")))
+            out = out.strip()
+            return code, out[-3000:], missing_dependency(code, out, self.dir)
         except Exception as ex:
             return 1, f"could not run verify command: {ex}", ""
 

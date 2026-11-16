@@ -131,9 +131,10 @@ How it behaves:
   `npm|pnpm|yarn|bun test` or `run <script>`, `go test|vet|build`, `cargo test|check|…`, `npx <test tool already
   installed>`, read-only checks (`test`, `grep`, `diff`, …), joined with `&&`/`||` or piped into read-only tools.
   No inline code, `$`, `;`, sub-shells, URLs, `..` or paths outside the project. Anything else is dropped (the task
-  is then reviewed by reading the code), and every command that will run is shown in full with the plan. On macOS
-  checks run under `sandbox-exec`: **no network, no writes outside the project, no reads of `~/.ssh`, `~/.aws`,
-  keychains or AI credentials**. Opt out knowingly with `omnicli config set verify_policy trust` /
+  is then reviewed by reading the code), and every command that will run is shown in full with the plan. Checks
+  run **without a shell** (nothing is expanded after checking), and on macOS each process runs under
+  `sandbox-exec`: **no network; nothing in your home folder can be read except the project and toolchain folders;
+  no programs from your home folder, no `security`/`curl`/`ssh`; no writes outside the project and temp/caches**. Opt out knowingly with `omnicli config set verify_policy trust` /
   `verify_sandbox false`. The tests themselves are still AI-written code — for untrusted projects use a container/VM.
 - **No secrets leak to the AIs** – AI CLIs and the commands they run get an allow-listed environment: basics,
   proxies/certificates, toolchain paths, and only *that* AI's own variables (`ANTHROPIC_*` for Claude, `OPENAI_*`
