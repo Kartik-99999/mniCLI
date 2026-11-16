@@ -126,13 +126,15 @@ How it behaves:
   Muse's default sandbox). Nothing disables an agent's permission system. Workers are told never to install anything
   outside the project. Note that Muse's default sandbox *does* allow network access to package indexes, so for Muse that
   rule is an instruction, not an enforced limit (in testing it once ran `pip install pytest` into the user's Python).
-- **Check commands are validated** – `verify` commands come from the lead AI, so before they run on your machine
-  they must be plain test invocations: a known test/build tool or read-only check, joined only with `&&`/`||`,
-  piping only into `grep`/`head`/…, no inline code (`python -c`), no `$`/`;`/sub-shells, no redirects except
-  `>/dev/null`, no paths outside the project. Anything else is dropped (the task is then reviewed by reading the
-  code) and every command that will run is shown in full with the plan. Opt out knowingly with
-  `omnicli config set verify_policy trust`. The tests themselves are still AI-written code — for untrusted projects
-  use a container or VM.
+- **Check commands are validated and sandboxed** – `verify` commands come from the lead AI, so they may only use
+  allowed forms: `python3 -m <test module or project module>` / `python3 <project file>.py`, `node --test`,
+  `npm|pnpm|yarn|bun test` or `run <script>`, `go test|vet|build`, `cargo test|check|…`, `npx <test tool already
+  installed>`, read-only checks (`test`, `grep`, `diff`, …), joined with `&&`/`||` or piped into read-only tools.
+  No inline code, `$`, `;`, sub-shells, URLs, `..` or paths outside the project. Anything else is dropped (the task
+  is then reviewed by reading the code), and every command that will run is shown in full with the plan. On macOS
+  checks run under `sandbox-exec`: **no network, no writes outside the project, no reads of `~/.ssh`, `~/.aws`,
+  keychains or AI credentials**. Opt out knowingly with `omnicli config set verify_policy trust` /
+  `verify_sandbox false`. The tests themselves are still AI-written code — for untrusted projects use a container/VM.
 - **No secrets leak to the AIs** – AI CLIs and the commands they run get an allow-listed environment: basics,
   proxies/certificates, toolchain paths, and only *that* AI's own variables (`ANTHROPIC_*` for Claude, `OPENAI_*`
   for Codex, …). Cloud keys, deploy tokens and your SSH agent are not passed. Add what a project needs with

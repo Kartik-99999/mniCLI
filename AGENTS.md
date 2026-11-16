@@ -8,14 +8,15 @@ task's verify command → the lead reviews (approve / revise) → git checkpoint
 ## Hard rules
 - **Python 3.9 standard library only.** The system `/usr/bin/python3` is 3.9.6: no `X | Y` unions at
   runtime, no `match`, no 3.10+ APIs. No third-party dependencies (that is a feature of the project).
-- **Run the full suite after every change** (currently 459 tests, all must pass):
+- **Run the full suite after every change** (currently 461 tests, all must pass):
   `PYTHONPATH=. python3 -m unittest discover -s tests -p "test_*.py"`
 - **Tests never touch the real `~/.omnicli`**: every test module sets
   `os.environ["OMNICLI_HOME"] = tempfile.mkdtemp(...)` *before* importing omnicli modules.
 - **Tests never call a real AI CLI.** Use `tests/fake_agent.py` (modes: good, picky, followup, broken,
   authfail, silent, limited, recorder) or a tiny fake script written to a temp dir.
 - **Security invariants (security review 2026-11-16) — keep them:** verify commands pass
-  `omnicli/safecmd.py` before running (planning *and* run time); child processes get `agents.agent_env(spec)`
+  `omnicli/safecmd.py` (allowed FORMS, not denylists) at planning and run time, and run under
+  `safecmd.sandbox_argv` on macOS; child processes get `agents.agent_env(spec)`
   (allow-list, never `os.environ` wholesale); git is set up only after plan approval and asks before a baseline
   commit (`GIT_EXCLUDES` keeps secrets out); team memory is per project and sanitized; revisions from state go
   through `gitutil.safe_rev`; chat AI commands go through the strict schema in `commands/chat.py`.

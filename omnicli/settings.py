@@ -32,6 +32,7 @@ SCHEMA: Dict[str, tuple] = {
     "models": (dict, {}, "per-agent model, e.g. models.claude=opus"),
     "effort": (dict, {}, "per-agent reasoning effort, e.g. effort.agy=high"),
     "verify_policy": (str, "strict", "strict = only plain test commands may run as checks; trust = run any (unsafe)"),
+    "verify_sandbox": (bool, True, "macOS: run checks with no network and no writes outside the project"),
     "env_passthrough": (list, None, "extra environment variables AI tools may see, e.g. AWS_PROFILE,MY_TOKEN"),
     "memory_scope": (str, "project", "project = lessons stay in their project; global = shared across projects"),
 }

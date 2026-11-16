@@ -1525,14 +1525,20 @@ class Conductor:
             return None
         # checked again here: state.json could have been edited after planning
         from omnicli import settings as _settings
-        from omnicli.safecmd import verify_allowed
-        ok, why = verify_allowed(t.verify, _settings.get("verify_policy"))
+        from omnicli.safecmd import sandbox_argv, verify_allowed
+        run_dir = Path(cwd or self.dir)
+        ok, why = verify_allowed(t.verify, _settings.get("verify_policy"), project_dir=run_dir)
         if not ok:
             self.say(f"{BADGE_WARN} {t.id}: not running check `{t.verify}`: it {why}")
             return None
+        argv = sandbox_argv(t.verify, run_dir) if _settings.get("verify_sandbox") else None
         try:
-            r = subprocess.run(t.verify, shell=True, cwd=str(cwd or self.dir), capture_output=True, text=True,
-                               timeout=600, stdin=subprocess.DEVNULL, env=ag.agent_env())
+            if argv:  # macOS: no network, no writes outside the project, no reads of secret folders
+                r = subprocess.run(argv, cwd=str(run_dir), capture_output=True, text=True,
+                                   timeout=600, stdin=subprocess.DEVNULL, env=ag.agent_env())
+            else:
+                r = subprocess.run(t.verify, shell=True, cwd=str(run_dir), capture_output=True, text=True,
+                                   timeout=600, stdin=subprocess.DEVNULL, env=ag.agent_env())
             out = (r.stdout + ("\n" + r.stderr if r.stderr else "")).strip()
             return r.returncode, out[-3000:], missing_dependency(r.returncode, out, self.dir)
         except subprocess.TimeoutExpired:
