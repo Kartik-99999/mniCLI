@@ -48,9 +48,32 @@ ACTION_RE = re.compile(r"^\s*`*\s*ACTION\s*:\s*(\{.*\})\s*`*\s*$", re.I)
 
 # Commands the AI may run for you. Anything that changes things still asks you itself
 # (undo/resume/review --fix confirm), and -y/--yes is always stripped from AI proposals.
-AI_ALLOWED_COMMANDS = {"status", "runs", "usage", "logs", "export", "doctor", "agents", "config",
-                       "undo", "rewind", "continue", "resume", "review"}
+# What the AI may run for you, as a strict schema: {command: ({flag: value_rule}, max positional args)}.
+# value_rule is None for a plain switch, or a regex the flag's value must fully match. Anything not
+# listed (other flags, -y/--yes, -o/--output, --add-dir, --fix, combined short flags like -qy, "--x=y"
+# forms) is refused, so text the AI reads (e.g. a hostile file in the project) can't smuggle options in.
+_WORD = r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}"
+AI_COMMAND_SCHEMA = {
+    "status":   ({"--json": None}, 1),
+    "runs":     ({"--all": None, "--json": None}, 0),
+    "usage":    ({"--days": r"\d{1,4}", "--since": r"\d{4}-\d{2}-\d{2}", "--by": r"agent|kind|run|day",
+                  "--agent": _WORD, "--json": None}, 0),
+    "logs":     ({"--agent": _WORD, "--lead": None, "--prompt": None, "--stderr": None, "--list": None,
+                  "--tail": r"\d{1,5}", "--json": None}, 1),
+    "export":   ({"--format": r"md|json|html"}, 1),
+    "doctor":   ({"--json": None}, 0),
+    "agents":   ({}, 0),
+    "config":   ({}, 2),
+    "undo":     ({"--list": None, "--json": None}, 1),
+    "rewind":   ({"--list": None, "--json": None}, 1),
+    "continue": ({}, 0),
+    "resume":   ({}, 1),
+    "review":   ({"--json": None, "--lead": _WORD}, 40),
+}
+AI_ALLOWED_COMMANDS = set(AI_COMMAND_SCHEMA)
 AI_CONFIG_SUBCOMMANDS = {"list", "get", "path", None}
+# AI-proposed commands that change files or spend AI quota: always ask the user first.
+AI_CONFIRM_COMMANDS = {"undo", "rewind", "continue", "resume", "review"}
 # Commands that take -d DIR; chat fills in the current project automatically.
 DIR_COMMANDS = {"status", "logs", "export", "undo", "rewind", "review", "usage"}
 # Slash commands passed straight through to the matching `omnicli <command>`.
@@ -130,21 +153,39 @@ def parse_reply(text: str) -> Tuple[str, Optional[Dict]]:
 
 
 def sanitize_command(args: List[str], project: Optional[Path]) -> Tuple[Optional[List[str]], str]:
-    """Validate an AI-proposed command. Returns (argv or None, reason if refused)."""
+    """Validate an AI-proposed command against AI_COMMAND_SCHEMA. Returns (argv or None, reason if refused)."""
     if not args or not isinstance(args, list):
         return None, "empty command"
     args = [str(a) for a in args if str(a).strip()]
     if args and args[0] == "omnicli":
         args = args[1:]
-    if not args or args[0] not in AI_ALLOWED_COMMANDS:
+    if not args or args[0] not in AI_COMMAND_SCHEMA:
         return None, f"'{args[0] if args else ''}' isn't something I can run from chat"
-    if args[0] == "config":
-        sub = args[1] if len(args) > 1 else None
-        if sub not in AI_CONFIG_SUBCOMMANDS:
+    cmd, rest = args[0], args[1:]
+    flags, max_pos = AI_COMMAND_SCHEMA[cmd]
+    positionals: List[str] = []
+    i = 0
+    while i < len(rest):
+        tok = rest[i]
+        if tok.startswith("-"):
+            if tok not in flags:
+                return None, f"the option '{tok}' isn't allowed from chat - type the command yourself if you want it"
+            rule = flags[tok]
+            if rule is not None:
+                if i + 1 >= len(rest) or not re.fullmatch(rule, rest[i + 1]):
+                    return None, f"'{tok}' needs a valid value"
+                i += 1
+        else:
+            positionals.append(tok)
+        i += 1
+    if len(positionals) > max_pos:
+        return None, f"too many arguments for '{cmd}'"
+    if cmd == "config":
+        sub = positionals[0] if positionals else None
+        if sub not in AI_CONFIG_SUBCOMMANDS or (sub != "get" and len(positionals) > 1):
             return None, "changing settings needs you to type /config set ... yourself"
-    args = [a for a in args if a not in ("-y", "--yes")]  # you always confirm destructive steps
-    if project is not None and args[0] in DIR_COMMANDS and not ({"-d", "--dir", "--run"} & set(args)):
-        args += ["-d", str(project)]
+    if project is not None and cmd in DIR_COMMANDS:
+        args = args + ["-d", str(project)]
     return args, ""
 
 
@@ -207,8 +248,9 @@ WHAT YOU CAN DO
    For a brand-new project with no current folder, suggest a short folder name in "dir" (e.g. "todo-app").
 3. Run an OmniCLI command for them - last line:
    ACTION: {{"type": "command", "args": ["status"]}}
-   Allowed: status, runs, usage, logs [TASK], export [--format html], doctor, agents, config list|get KEY,
-   undo TASK (the user will be asked to confirm), continue, resume, review [focus text].
+   Allowed (no other options): status, runs [--all], usage [--by agent|kind|run|day] [--days N],
+   logs [TASK] [--tail N], export [--format md|json|html], doctor, agents, config list|get KEY,
+   undo TASK, continue, resume [REF], review [focus text]. The user confirms undo/continue/resume/review.
 Use at most ONE ACTION line, only when the user clearly wants that. Otherwise just answer.
 
 CONVERSATION SO FAR:
@@ -490,6 +532,10 @@ class ChatSession:
             argv, why = sanitize_command(action.get("args") or [], self.project)
             if argv is None:
                 self.out(f"{BADGE_WARN} Skipped the suggested command: {why}.")
+                return
+            if argv[0] in AI_CONFIRM_COMMANDS and not self._ask(
+                    f"The AI wants to run `omnicli {' '.join(shlex.quote(a) for a in argv)}`. Run it?", default_yes=False):
+                self.out(c_dim("Okay, not run."))
                 return
             self.run_command(argv)
 

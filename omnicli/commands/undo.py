@@ -149,7 +149,9 @@ def git_work_tree(d: Path) -> bool:
 
 def resolve_commit(d: Path, commit: str) -> str:
     """Full hash of a stored (usually short) checkpoint hash, or '' if it is not in the repo."""
-    if not commit:
+    from omnicli.gitutil import safe_rev
+    commit = safe_rev(commit)
+    if not commit:  # missing, or not a plain commit id
         return ""
     r = _git(d, "rev-parse", "--verify", "-q", f"{commit}^{{commit}}")
     return r.stdout.strip() if r.returncode == 0 else ""

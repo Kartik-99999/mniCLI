@@ -493,14 +493,16 @@ def prepare_fork(ref: str, task_id: str, agent: str, destination: Optional[str] 
     index = next((i for i, task in enumerate(tasks) if task.get("id") == task_id), None)
     if index is None:
         raise ValueError("task {!r} is not in this run".format(task_id))
-    if tasks[index].get("commit"):
-        base_result = subprocess.run(["git", "rev-parse", "{}^".format(tasks[index]["commit"])],
+    from omnicli.gitutil import safe_rev
+    if safe_rev(tasks[index].get("commit")):
+        base_result = subprocess.run(["git", "rev-parse", "--verify", "{}^".format(safe_rev(tasks[index]["commit"]))],
                                      cwd=str(source), capture_output=True, text=True)
         base = base_result.stdout.strip() if base_result.returncode == 0 else ""
     else:
         base = ""
     if not base:
-        previous = next((task.get("commit") for task in reversed(tasks[:index]) if task.get("commit")), "")
+        previous = next((safe_rev(task.get("commit")) for task in reversed(tasks[:index])
+                         if safe_rev(task.get("commit"))), "")
         if previous:
             base = previous
         else:

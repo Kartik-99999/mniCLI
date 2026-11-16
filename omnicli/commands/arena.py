@@ -41,14 +41,15 @@ def _git(root, *args, **kwargs):
 
 
 def _task_base(root, tasks, index):
+    from omnicli.gitutil import safe_rev
     task = tasks[index]
-    if task.get("commit"):
-        result = _git(root, "rev-parse", str(task["commit"]) + "^")
+    if safe_rev(task.get("commit")):
+        result = _git(root, "rev-parse", "--verify", safe_rev(task["commit"]) + "^")
         if result.returncode == 0:
             return result.stdout.strip()
     for earlier in reversed(tasks[:index]):
-        if earlier.get("commit"):
-            return str(earlier["commit"])
+        if safe_rev(earlier.get("commit")):
+            return safe_rev(earlier["commit"])
     result = _git(root, "rev-parse", "HEAD")
     if result.returncode:
         raise ValueError("arena requires a Git project with at least one commit")

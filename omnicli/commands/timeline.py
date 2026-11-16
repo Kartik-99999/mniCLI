@@ -73,10 +73,11 @@ def handler(args):
     if getattr(args, "diff", False):
         directory = Path(rec["dir"])
         for task in state.get("tasks", []):
-            commit = task.get("commit")
-            if not commit:
+            from omnicli.gitutil import safe_rev
+            commit = safe_rev(task.get("commit"))
+            if not commit:  # missing, or not a plain commit id (never pass state values to git as options)
                 continue
-            result = subprocess.run(["git", "show", "--format=fuller", "--stat", "--patch", commit],
+            result = subprocess.run(["git", "show", "--format=fuller", "--stat", "--patch", "--end-of-options", commit],
                                     cwd=str(directory), capture_output=True, text=True)
             if result.returncode == 0:
                 print("\n" + result.stdout)

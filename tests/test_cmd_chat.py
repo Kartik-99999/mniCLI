@@ -30,7 +30,11 @@ elif "build" in msg:
     print('ACTION: {"type": "build", "goal": "create hello.txt saying hi", "dir": "hello-proj"}')
 elif "progress" in msg:
     print("Here's the status:")
-    print('ACTION: {"type": "command", "args": ["status", "-y"]}')
+    print('ACTION: {"type": "command", "args": ["status"]}')
+elif "undo" in msg:
+    print('ACTION: {"type": "command", "args": ["undo", "t2"]}')
+elif "sneaky" in msg:
+    print('ACTION: {"type": "command", "args": ["export", "-o", "/tmp/owned.txt"]}')
 elif "wipe" in msg:
     print('ACTION: {"type": "command", "args": ["rm", "-rf", "/"]}')
 elif "remember" in msg:
@@ -112,12 +116,26 @@ class TestParsing(unittest.TestCase):
         proj = Path("/tmp/p")
         argv, _ = chat.sanitize_command(["status"], proj)
         self.assertEqual(argv, ["status", "-d", "/tmp/p"])
-        argv, _ = chat.sanitize_command(["omnicli", "undo", "t2", "-y"], proj)
-        self.assertEqual(argv, ["undo", "t2", "-d", "/tmp/p"])  # -y always stripped
+        argv, _ = chat.sanitize_command(["omnicli", "undo", "t2"], proj)
+        self.assertEqual(argv, ["undo", "t2", "-d", "/tmp/p"])
+        self.assertEqual(chat.sanitize_command(["usage", "--by", "run", "--days", "7"], proj)[0],
+                         ["usage", "--by", "run", "--days", "7", "-d", "/tmp/p"])
         self.assertIsNone(chat.sanitize_command(["rm", "-rf", "/"], proj)[0])
         self.assertIsNone(chat.sanitize_command(["config", "set", "lead", "x"], proj)[0])
         self.assertEqual(chat.sanitize_command(["config", "get", "lead"], proj)[0], ["config", "get", "lead"])
         self.assertEqual(chat.sanitize_command(["runs"], proj)[0], ["runs"])  # no -d for runs
+
+    def test_injected_options_are_refused(self):
+        proj = Path("/tmp/p")
+        for argv in (["undo", "t2", "-y"], ["undo", "t2", "--yes"],
+                     ["export", "-o", "/Users/x/.zshrc"], ["export", "--output", "/tmp/x"],
+                     ["status", "-qy"], ["review", "--fix"], ["continue", "--add-dir", "/Users/x/Documents"],
+                     ["usage", "--by", "run;rm"], ["usage", "--by=run"], ["logs", "--tail", "-5"],
+                     ["export", "--format", "html", "--format"], ["doctor", "--fix"], ["agents", "--check"],
+                     ["status", "a", "b"], ["config", "path", "extra"]):
+            got, why = chat.sanitize_command(argv, proj)
+            self.assertIsNone(got, f"{argv} should be refused")
+            self.assertTrue(why)
 
     def test_default_project_never_home(self):
         self.assertIsNone(chat.default_project(Path.home()))
@@ -175,6 +193,20 @@ class TestSession(ChatBase):
         self.assertFalse(FakeConductor.instances[0].cfg.resume)
         self.assertEqual(FakeConductor.instances[0].cfg.goal, "add dark mode")
         self.assertEqual(len(list(st.glob("state.prev-*.json"))), 1)
+
+    def test_ai_changing_command_needs_confirmation(self):
+        proj = self.tmp / "pc"
+        proj.mkdir()
+        s = self.session(["please undo it", "n", "please undo it", "y"], project=proj)
+        s.loop()
+        self.assertEqual(self.cli_calls, [["undo", "t2", "-d", str(proj.resolve())]])  # only after "y"
+        self.assertIn("The AI wants to run", self.text())
+
+    def test_ai_cannot_smuggle_options(self):
+        s = self.session(["be sneaky"])
+        s.loop()
+        self.assertEqual(self.cli_calls, [])
+        self.assertIn("isn't allowed from chat", self.text())
 
     def test_ai_command_runs_with_project_and_without_yes(self):
         proj = self.tmp / "p1"

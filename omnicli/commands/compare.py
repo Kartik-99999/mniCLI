@@ -69,9 +69,11 @@ def _verify_exit(task):
 
 
 def _commit_summary(folder, commit):
-    if not commit:
+    from omnicli.gitutil import safe_rev
+    commit = safe_rev(commit)
+    if not commit:  # missing, or not a plain commit id (never pass state values to git as options)
         return ""
-    result = subprocess.run(["git", "show", "--stat", "--format=", str(commit)], cwd=folder,
+    result = subprocess.run(["git", "show", "--stat", "--format=", "--end-of-options", commit], cwd=folder,
                             capture_output=True, text=True)
     return result.stdout.strip() if result.returncode == 0 else ""
 
