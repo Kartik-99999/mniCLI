@@ -2,6 +2,8 @@
 
 OmniCLI brings AI coding CLIs together to plan, build, verify, and review a project as a team. Its chat mode gives you a conversational way to work with that team, while `omnicli team` starts a run directly from the terminal.
 
+![OmniCLI chat mode](docs/chat.png)
+
 OmniCLI is tested on macOS with Python 3.9. Linux should work, but is not yet verified. Windows is not supported because process management uses Unix process groups.
 
 Tested AI CLI versions: Claude 2.1.325, Codex CLI 0.169.0, agy 1.5.9, and Muse 1.4.20.

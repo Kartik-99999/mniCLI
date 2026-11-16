@@ -69,7 +69,8 @@ class TestArenaEndToEnd(unittest.TestCase):
             "tasks": [{"id": "t1", "title": "Part A", "assignee": "w1", "instructions": "make a/a.txt",
                        "owns": ["a"], "verify": "test -f a/a.txt", "status": "done", "agent_used": "w1",
                        "attempts": [], "commit": t1_commit}]}))
-        from omnicli import runs
+        from omnicli import runs, settings
+        settings.set_value("verify_sandbox", "false")  # the outer test runner forbids nested sandbox-exec
         runs.register_run({"dir": str(self.proj), "goal": "fake goal", "phase": "complete"})
 
     def test_full_arena_run(self):

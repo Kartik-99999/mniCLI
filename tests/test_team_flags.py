@@ -218,6 +218,10 @@ class TestConductorAgentOptions(HomeIsolated):
 # --------------------------------------------------------------------------- budgets
 
 class TestBudgets(HomeIsolated):
+    def setUp(self):
+        super().setUp()
+        settings.set_value("verify_sandbox", "false")  # the outer test runner forbids nested sandbox-exec
+
     def test_max_calls_stops_then_resume_completes(self):
         # plan (1) + t1 worker (2) + t1 review (3) -> no call left for t2
         c = self.make({"alpha": "good"}, jobs=1, max_calls=3)

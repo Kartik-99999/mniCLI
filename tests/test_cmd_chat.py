@@ -128,8 +128,8 @@ class TestParsing(unittest.TestCase):
     def test_injected_options_are_refused(self):
         proj = Path("/tmp/p")
         for argv in (["undo", "t2", "-y"], ["undo", "t2", "--yes"],
-                     ["export", "-o", "/Users/x/.zshrc"], ["export", "--output", "/tmp/x"],
-                     ["status", "-qy"], ["review", "--fix"], ["continue", "--add-dir", "/Users/x/Documents"],
+                     ["export", "-o", "/home/example/.zshrc"], ["export", "--output", "/tmp/x"],
+                     ["status", "-qy"], ["review", "--fix"], ["continue", "--add-dir", "/home/example/Documents"],
                      ["usage", "--by", "run;rm"], ["usage", "--by=run"], ["logs", "--tail", "-5"],
                      ["export", "--format", "html", "--format"], ["doctor", "--fix"], ["agents", "--check"],
                      ["status", "a", "b"], ["config", "path", "extra"]):

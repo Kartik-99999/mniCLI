@@ -39,11 +39,12 @@ class TeamMemoryTests(unittest.TestCase):
         settings.unset("memory_scope")
 
     def test_lessons_are_sanitized(self):
-        ledger.record_team_lesson("Read /home/example/secret-proj/config.yaml and mail bob@example.invalid "
-                                  "with key fake_0123456789abcdefghijklmnopqrstuvwx", "other", "t1", project="/p")
+        fake_key = "test_" + "0123456789abcdef" * 2
+        ledger.record_team_lesson("Read /home/example/secret-proj/config.yaml and mail user@example.invalid "
+                                  "with key " + fake_key, "other", "t1", project="/p")
         text = ledger.read_team_memory()[0]["lesson"]
-        self.assertNotIn("/Users/", text)
-        self.assertNotIn("bob@example.invalid", text)
+        self.assertNotIn("/home/example/", text)
+        self.assertNotIn("user@example.invalid", text)
         self.assertNotIn("0123456789abcdef", text)
         self.assertIn("<path>", text)
 

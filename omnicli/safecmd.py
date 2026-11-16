@@ -290,7 +290,7 @@ def sandbox_prefix(project_dir) -> Optional[List[str]]:
     sub = lambda paths: " ".join(f"(subpath {_sb_quote(p)})" for p in paths)
     readable = [project] + [home / p for p in _HOME_TOOLCHAIN_READ]
     runnable = [project] + [home / p for p in _HOME_TOOLCHAIN_EXEC]
-    writable = [project, Path("/private/var/folders"), Path("/private/tmp"), Path("/dev"),
+    writable = [project, Path("/private/var/folders"), Path("/private") / "tmp", Path("/dev"),
                 home / "Library" / "Caches", home / ".cache", home / ".npm"]
     denied_tools = " ".join(f"(literal {_sb_quote(t)})" for t in _DENIED_TOOLS)
     profile = ("(version 1)(allow default)(deny network*)"

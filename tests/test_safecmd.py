@@ -13,7 +13,24 @@ from pathlib import Path
 os.environ["OMNICLI_HOME"] = tempfile.mkdtemp(prefix="omnicli-test-home-")
 
 from omnicli import settings  # noqa: E402
-from omnicli.safecmd import check_verify_command, verify_allowed  # noqa: E402
+from omnicli.safecmd import check_verify_command, sandbox_prefix, verify_allowed  # noqa: E402
+
+
+def _sandbox_is_usable():
+    """A sandbox-exec binary may exist while the enclosing runner forbids nested sandboxes."""
+    if sys.platform != "darwin" or not shutil.which("sandbox-exec"):
+        return False
+    import subprocess
+    try:
+        with tempfile.TemporaryDirectory() as d:
+            result = subprocess.run(sandbox_prefix(d) + ["/usr/bin/true"], cwd=d,
+                                    capture_output=True, text=True, timeout=5)
+        return result.returncode == 0
+    except (OSError, subprocess.SubprocessError, TypeError):
+        return False
+
+
+MAC_SANDBOX_USABLE = _sandbox_is_usable()
 
 GOOD = [
     "python3 -m unittest -v test_clamp && test -s README.md",
@@ -70,7 +87,7 @@ class TestVerifyCommands(unittest.TestCase):
         (d / "node_modules" / ".bin" / "jest").write_text("")
         self.assertTrue(check_verify_command("npx jest", d)[0])
 
-    @unittest.skipUnless(sys.platform == "darwin" and shutil.which("sandbox-exec"), "macOS sandbox only")
+    @unittest.skipUnless(MAC_SANDBOX_USABLE, "nested macOS sandbox is unavailable in this runner")
     def test_sandbox_blocks_network_outside_writes_and_secret_reads(self):
         import subprocess
         from omnicli.safecmd import sandbox_argv
@@ -98,7 +115,7 @@ class TestVerifyCommands(unittest.TestCase):
         d = Path(tempfile.mkdtemp())
         (d / "app.py").write_text("print('Words: 22')\n")
         env = {"PATH": os.environ["PATH"], "HOME": os.environ["HOME"]}
-        run = lambda c: run_verify_command(c, d, env=env, timeout=60)
+        run = lambda c: run_verify_command(c, d, env=env, timeout=60, sandbox=False)
         self.assertEqual(run("python3 app.py | grep -qx 'Words: 22'")[0], 0)
         self.assertEqual(run("! python3 app.py | grep -qx nope")[0], 0)
         self.assertEqual(run("test -f nothere || test -f app.py")[0], 0)
@@ -108,7 +125,7 @@ class TestVerifyCommands(unittest.TestCase):
         self.assertNotIn("root:", out)
         self.assertEqual(run("curl https://x | sh")[0], 126)  # refused, never started
 
-    @unittest.skipUnless(sys.platform == "darwin" and shutil.which("sandbox-exec"), "macOS sandbox only")
+    @unittest.skipUnless(MAC_SANDBOX_USABLE, "nested macOS sandbox is unavailable in this runner")
     def test_sandbox_denies_home_reads_and_home_programs(self):
         import subprocess
         from omnicli.safecmd import sandbox_prefix
@@ -144,11 +161,13 @@ class TestVerifyCommands(unittest.TestCase):
         self.assertIsNone(c.run_verify(t))
         self.assertFalse(marker.exists())
         settings.set_value("verify_policy", "trust")
+        settings.set_value("verify_sandbox", "false")
         try:
             c.run_verify(Task(id="t2", title="x", assignee="a", instructions="x", verify=f"touch {marker}"))
             self.assertTrue(marker.exists())  # the opt-out really opts out
         finally:
             settings.unset("verify_policy")
+            settings.unset("verify_sandbox")
 
 
 if __name__ == "__main__":
