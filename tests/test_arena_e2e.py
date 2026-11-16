@@ -86,6 +86,33 @@ class TestArenaEndToEnd(unittest.TestCase):
         # temporary arena worktrees are cleaned up
         self.assertEqual(len(git(self.proj, "worktree", "list").splitlines()), 1)
 
+    def _later_commit(self, rel, text, msg):
+        (self.proj / rel).write_text(text)
+        git(self.proj, "add", "-A")
+        git(self.proj, "commit", "-q", "-m", msg)
+
+    def test_later_work_on_other_files_is_kept(self):
+        from omnicli.commands.arena import run_arena
+        self._later_commit("README.md", "edited by a later task\n", "t2: docs")
+        run_arena(str(self.proj), "t1", ["w1", "w2"], "judge")
+        self.assertEqual((self.proj / "README.md").read_text(), "edited by a later task\n")
+        self.assertEqual((self.proj / "a" / "a.txt").read_text(), "t1 by good\n")  # the winner's version
+        # the project now equals exactly the winner's verified snapshot
+        winner_tree = git(self.proj, "write-tree")
+        record = json.loads(sorted((self.proj / ".omnicli" / "team" / "arena-results").glob("*.json"))[-1].read_text())
+        self.assertEqual(winner_tree, record["winner_tree"])
+
+    def test_refuses_when_later_work_touched_the_same_lines(self):
+        from omnicli.commands.arena import run_arena
+        self._later_commit("a/a.txt", "rewritten by a later task\n", "t2: rewrite a")
+        head_before = git(self.proj, "rev-parse", "HEAD")
+        with self.assertRaises(ValueError) as cm:
+            run_arena(str(self.proj), "t1", ["w1", "w2"], "judge")
+        self.assertIn("can't redo t1", str(cm.exception))
+        self.assertEqual(git(self.proj, "rev-parse", "HEAD"), head_before)
+        self.assertEqual(git(self.proj, "status", "--porcelain"), "")
+        self.assertEqual(len(git(self.proj, "worktree", "list").splitlines()), 1)
+
 
 if __name__ == "__main__":
     unittest.main()

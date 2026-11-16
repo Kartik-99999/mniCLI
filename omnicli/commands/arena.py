@@ -40,22 +40,6 @@ def _git(root, *args, **kwargs):
     return subprocess.run(["git"] + list(args), cwd=str(root), capture_output=True, text=True, **kwargs)
 
 
-def _task_base(root, tasks, index):
-    from omnicli.gitutil import safe_rev
-    task = tasks[index]
-    if safe_rev(task.get("commit")):
-        result = _git(root, "rev-parse", "--verify", safe_rev(task["commit"]) + "^")
-        if result.returncode == 0:
-            return result.stdout.strip()
-    for earlier in reversed(tasks[:index]):
-        if safe_rev(earlier.get("commit")):
-            return safe_rev(earlier["commit"])
-    result = _git(root, "rev-parse", "HEAD")
-    if result.returncode:
-        raise ValueError("arena requires a Git project with at least one commit")
-    return result.stdout.strip()
-
-
 def run_arena(ref, task_id, agent_names, lead=None):
     if len(agent_names) not in (2, 3) or len(set(agent_names)) != len(agent_names):
         raise ValueError("arena needs two or three different agent ids")
@@ -82,7 +66,14 @@ def run_arena(ref, task_id, agent_names, lead=None):
     status = _git(root, "status", "--porcelain")
     if status.returncode or status.stdout.strip():
         raise ValueError("the Git project must have a clean working tree before an arena; checkpoint or stash changes first")
-    base = _task_base(root, state["tasks"], task_index)
+    from omnicli.gitutil import safe_rev
+    head = _git(root, "rev-parse", "--verify", "HEAD")
+    if head.returncode:
+        raise ValueError("arena requires a Git project with at least one commit")
+    head_id = head.stdout.strip()
+    # Candidates start from the CURRENT project with the task's own checkpoint undone, so the state
+    # they build and verify is exactly the state that is applied if they win.
+    task_commit = safe_rev(state["tasks"][task_index].get("commit"))
 
     from omnicli.conductor import Conductor
     cfg = TeamConfig(goal=state.get("goal", ""), project_dir=project, lead=lead or state.get("lead"),
@@ -100,9 +91,20 @@ def run_arena(ref, task_id, agent_names, lead=None):
     try:
         for index, name in enumerate(agent_names):
             worktree = arena_root / ("candidate-{}".format(index + 1))
-            added = _git(root, "worktree", "add", "--detach", str(worktree), base)
+            added = _git(root, "worktree", "add", "--detach", str(worktree), head_id)
             if added.returncode:
                 raise ValueError("could not create arena worktree: {}".format((added.stderr or added.stdout).strip()))
+            if task_commit:
+                undone = _git(worktree, "revert", "--no-commit", task_commit)
+                if undone.returncode:
+                    _git(worktree, "revert", "--abort")
+                    raise ValueError("can't redo {}: later work changed the same lines it wrote, so it can't be undone "
+                                     "cleanly. Undo those later tasks first (omnicli undo) or start a new task."
+                                     .format(task_id))
+            start_tree = _git(worktree, "write-tree")
+            if start_tree.returncode:
+                raise ValueError("could not snapshot the arena starting point")
+            base = start_tree.stdout.strip()
             workspace = worktree / project_subdir
             prompt = build_worker_prompt(agents_task, state.get("goal", ""), workspace, "Anonymous arena participant",
                                          conductor.lead, [agents_task])
@@ -117,19 +119,17 @@ def run_arena(ref, task_id, agent_names, lead=None):
                                    meta={"kind": "task", "run_dir": str(project), "task_id": task_id})
             verify = conductor.run_verify(agents_task, workspace) if run.ok else None
             add = _git(worktree, "add", "-A")
-            diff = _git(worktree, "diff", "--cached", "--binary", base, "--") if add.returncode == 0 else None
-            stat = _git(worktree, "diff", "--cached", "--stat", base, "--") if add.returncode == 0 else None
-            # snapshot of the candidate's finished files (a tree object shared with the main repo) and the
-            # paths it changed, so the winner can later be applied onto the CURRENT project state
+            # the candidate's finished project as a tree object (shared with the main repo): exactly what was
+            # verified, and exactly what is applied if it wins. Tree-to-tree diffs need no pathspecs.
             tree = _git(worktree, "write-tree") if add.returncode == 0 else None
             tree_id = tree.stdout.strip() if tree and tree.returncode == 0 else ""
-            changed = _git(worktree, "diff", "--cached", "--name-only", base, "--") if add.returncode == 0 else None
-            results.append({"agent": name, "ok": run.ok, "verify": verify, "error": run.failure_reason() if not run.ok else "",
+            diff = _git(worktree, "diff", "--binary", base, tree_id) if tree_id else None
+            stat = _git(worktree, "diff", "--stat", base, tree_id) if tree_id else None
+            results.append({"agent": name, "ok": run.ok and bool(tree_id), "verify": verify,
+                            "error": run.failure_reason() if not run.ok else ("" if tree_id else "could not snapshot"),
                             "diff": (diff.stdout if diff and diff.returncode == 0 else ""),
                             "summary": (stat.stdout if stat and stat.returncode == 0 else ""),
-                            "tree": tree_id,
-                            "paths": [p for p in (changed.stdout.splitlines() if changed and changed.returncode == 0 else [])
-                                      if p.strip()]})
+                            "tree": tree_id})
 
         ready = [row for row in results if row["ok"]]
         if not ready:
@@ -158,21 +158,23 @@ TASK: {} — {}
         if chosen["verify"] is not None and not verify_passed(chosen["verify"]):
             raise ValueError("the lead selected a candidate whose verification failed; no changes were applied")
         winning_label = next(label for label, name in labels if name == chosen["agent"])
-        # The candidates rebuilt the task from the checkpoint BEFORE it, but the project already contains
-        # the original version: apply "current project -> winner's files" for the paths the winner changed.
-        patch = ""
-        if chosen.get("tree") and chosen.get("paths"):
-            made = _git(root, "diff", "--binary", "HEAD", chosen["tree"], "--", *chosen["paths"])
-            if made.returncode:
-                raise ValueError("could not prepare the winning changes: {}".format((made.stderr or made.stdout).strip()))
-            patch = made.stdout
+        # The project must still be where the arena started, then it becomes exactly the winner's tree.
+        now_head = _git(root, "rev-parse", "--verify", "HEAD").stdout.strip()
+        now_status = _git(root, "status", "--porcelain")
+        if now_head != head_id or now_status.returncode or now_status.stdout.strip():
+            raise ValueError("the project changed while the arena ran; nothing was applied. Run the arena again.")
+        made = _git(root, "diff", "--binary", "HEAD", chosen["tree"])
+        if made.returncode:
+            raise ValueError("could not prepare the winning changes: {}".format((made.stderr or made.stdout).strip()))
+        patch = made.stdout
         if patch:
             applied = _git(root, "apply", "--index", "--binary", "-", input=patch)
             if applied.returncode:
                 raise ValueError("could not apply the winning patch: {}".format((applied.stderr or applied.stdout).strip()))
         result_dir = project / ".omnicli" / "team" / "arena-results"
         result_dir.mkdir(parents=True, exist_ok=True)
-        record = {"task": task_id, "base": base, "winner": chosen["agent"], "blind_label": winning_label,
+        record = {"task": task_id, "base": head_id, "undid_task_commit": task_commit or "",
+                  "winner": chosen["agent"], "blind_label": winning_label, "winner_tree": chosen["tree"],
                   "reason": (decision or {}).get("reason", ""),
                   "candidates": [{"label": label, "agent": row["agent"], "ok": row["ok"],
                                   "verify_exit": row["verify"][0] if row["verify"] else None,
