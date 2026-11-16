@@ -1,0 +1,48 @@
+{
+  "name": "ai-trio-ensemble",
+  "description": "AI CLI diagnostics: muse, codex and agy health/version checks in parallel plus a report (for real multi-agent building use `omnicli team`)",
+  "parallel": true,
+  "steps": [
+    {
+      "id": "muse_audit",
+      "name": "Muse CLI Skill Audit",
+      "cli": "muse",
+      "command": "muse skills list --enabled-only",
+      "description": "Muse: Scans and audits enabled agent skills and coding capabilities",
+      "allow_failure": true
+    },
+    {
+      "id": "codex_doctor",
+      "name": "Codex CLI System Diagnostics",
+      "cli": "codex",
+      "command": "codex doctor",
+      "description": "Codex: Performs full runtime diagnostics and sandbox verification",
+      "allow_failure": true
+    },
+    {
+      "id": "agy_probe",
+      "name": "Antigravity CLI Engine Verification",
+      "cli": "agy",
+      "command": "agy --version",
+      "description": "Antigravity: Probes AGY core engine version and runtime bridge",
+      "allow_failure": true
+    },
+    {
+      "id": "synthesis_work",
+      "name": "Synthesize AI Trio Collaborative Report",
+      "cli": "python3",
+      "command": "python3 -m omnicli.ai_ensemble",
+      "description": "Synthesizes outputs into AI_TRIO_REPORT.md and ensemble configuration",
+      "depends_on": ["muse_audit", "codex_doctor", "agy_probe"]
+    },
+    {
+      "id": "git_commit",
+      "name": "Git Version Control Checkpoint",
+      "cli": "git",
+      "command": "git init && git add AI_TRIO_REPORT.md agent_ensemble_config.json && git commit -m 'feat: AI Trio (muse, codex, agy) collaborative project run'",
+      "description": "Git: Checkpoints the collaborative work into version control",
+      "depends_on": ["synthesis_work"],
+      "allow_failure": true
+    }
+  ]
+}

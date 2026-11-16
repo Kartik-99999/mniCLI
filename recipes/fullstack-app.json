@@ -1,0 +1,40 @@
+{
+  "name": "fullstack-app",
+  "description": "Fullstack microservice with API backend, static UI, git repo, and containerization",
+  "variables": {
+    "project_name": "fullstack_demo"
+  },
+  "steps": [
+    {
+      "id": "scaffold",
+      "name": "Create directory layout",
+      "cli": "mkdir",
+      "command": "mkdir -p backend frontend",
+      "description": "Scaffold folder layout"
+    },
+    {
+      "id": "backend_code",
+      "name": "Write backend service",
+      "cli": "python3",
+      "command": "python3 -c \"open('backend/app.py', 'w').write('print(\\\"Backend API active\\\")\\n')\"",
+      "description": "Generate backend entrypoint",
+      "depends_on": ["scaffold"]
+    },
+    {
+      "id": "frontend_code",
+      "name": "Write frontend index",
+      "cli": "python3",
+      "command": "python3 -c \"open('frontend/index.html', 'w').write('<h1>Fullstack App</h1>\\n')\"",
+      "description": "Generate frontend HTML",
+      "depends_on": ["scaffold"]
+    },
+    {
+      "id": "git_commit",
+      "name": "Git initialization",
+      "cli": "git",
+      "command": "git init && git add . && git commit -m 'Initial commit of fullstack application'",
+      "description": "Commit project to version control",
+      "depends_on": ["backend_code", "frontend_code"]
+    }
+  ]
+}

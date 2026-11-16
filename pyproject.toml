@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "omnicli"
+version = "2.0.0"
+description = "Universal CLI Orchestrator: Connect all command-line tools on your device to complete projects from a single command."
+readme = "README.md"
+authors = [{ name = "Kartik Bhardwaj" }]
+requires-python = ">=3.9"
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Environment :: Console",
+    "Topic :: Software Development :: Build Tools",
+]
+
+[project.scripts]
+omnicli = "omnicli.cli:main"
+cliconnect = "omnicli.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["omnicli*"]
