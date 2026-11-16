@@ -117,11 +117,19 @@ def run_arena(ref, task_id, agent_names, lead=None):
                                    meta={"kind": "task", "run_dir": str(project), "task_id": task_id})
             verify = conductor.run_verify(agents_task, workspace) if run.ok else None
             add = _git(worktree, "add", "-A")
-            diff = _git(worktree, "diff", "--binary", base, "--") if add.returncode == 0 else None
-            stat = _git(worktree, "diff", "--stat", base, "--") if add.returncode == 0 else None
+            diff = _git(worktree, "diff", "--cached", "--binary", base, "--") if add.returncode == 0 else None
+            stat = _git(worktree, "diff", "--cached", "--stat", base, "--") if add.returncode == 0 else None
+            # snapshot of the candidate's finished files (a tree object shared with the main repo) and the
+            # paths it changed, so the winner can later be applied onto the CURRENT project state
+            tree = _git(worktree, "write-tree") if add.returncode == 0 else None
+            tree_id = tree.stdout.strip() if tree and tree.returncode == 0 else ""
+            changed = _git(worktree, "diff", "--cached", "--name-only", base, "--") if add.returncode == 0 else None
             results.append({"agent": name, "ok": run.ok, "verify": verify, "error": run.failure_reason() if not run.ok else "",
                             "diff": (diff.stdout if diff and diff.returncode == 0 else ""),
-                            "summary": (stat.stdout if stat and stat.returncode == 0 else "")})
+                            "summary": (stat.stdout if stat and stat.returncode == 0 else ""),
+                            "tree": tree_id,
+                            "paths": [p for p in (changed.stdout.splitlines() if changed and changed.returncode == 0 else [])
+                                      if p.strip()]})
 
         ready = [row for row in results if row["ok"]]
         if not ready:
@@ -150,7 +158,14 @@ TASK: {} — {}
         if chosen["verify"] is not None and not verify_passed(chosen["verify"]):
             raise ValueError("the lead selected a candidate whose verification failed; no changes were applied")
         winning_label = next(label for label, name in labels if name == chosen["agent"])
-        patch = chosen["diff"]
+        # The candidates rebuilt the task from the checkpoint BEFORE it, but the project already contains
+        # the original version: apply "current project -> winner's files" for the paths the winner changed.
+        patch = ""
+        if chosen.get("tree") and chosen.get("paths"):
+            made = _git(root, "diff", "--binary", "HEAD", chosen["tree"], "--", *chosen["paths"])
+            if made.returncode:
+                raise ValueError("could not prepare the winning changes: {}".format((made.stderr or made.stdout).strip()))
+            patch = made.stdout
         if patch:
             applied = _git(root, "apply", "--index", "--binary", "-", input=patch)
             if applied.returncode:
@@ -161,7 +176,7 @@ TASK: {} — {}
                   "reason": (decision or {}).get("reason", ""),
                   "candidates": [{"label": label, "agent": row["agent"], "ok": row["ok"],
                                   "verify_exit": row["verify"][0] if row["verify"] else None,
-                                  "summary": row["summary"][:2000]} for label, row in labels]}
+                                  "summary": row["summary"][:2000]} for label, row in sorted(blind.items())]}
         (result_dir / "{}.json".format(datetime.datetime.now().strftime("%Y%m%d-%H%M%S"))).write_text(
             json.dumps(record, indent=2), encoding="utf-8")
         return record

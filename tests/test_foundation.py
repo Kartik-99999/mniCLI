@@ -187,6 +187,15 @@ class TestCoreHardening(FoundationBase):
                       specs={"a": spec}, health={"a": {"ok": True}}, verbose=False)
         self.assertEqual(c.specs["a"].get("_images"), ["/x/1.png"])
 
+    def test_red_team_tests_must_run_under_the_approved_verify(self):
+        from omnicli.conductor import Task, build_red_team_prompt
+        t = Task(id="t1", title="clamp", assignee="codex", instructions="x", verify="python3 -m unittest -v test_clamp")
+        p = build_red_team_prompt(t, Path("/w"))
+        self.assertIn("    python3 -m unittest -v test_clamp", p)
+        self.assertIn("MUST be executed by it", p)
+        no_verify = build_red_team_prompt(Task(id="t2", title="y", assignee="a", instructions="x"), Path("/w"))
+        self.assertIn("no automated check command", no_verify)
+
     def test_banner_never_printed_into_pipes_or_json(self):
         import contextlib, io
         from omnicli import cli

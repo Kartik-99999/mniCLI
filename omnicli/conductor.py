@@ -583,6 +583,32 @@ Reply with ONLY a JSON object:
 """
 
 
+def build_red_team_prompt(task: "Task", workspace: Path) -> str:
+    """Prompt for the independent red-team agent. Its tests must run under the task's existing,
+    user-approved verify command - OmniCLI never executes a test command an AI makes up."""
+    if task.verify:
+        how = (f"OmniCLI will run exactly this command next, and your tests MUST be executed by it:\n"
+               f"    {task.verify}\n"
+               "Put them where that command finds them (for example, add test cases to a test file it already "
+               "runs). Tests that this command does not run are worthless here.")
+    else:
+        how = ("This task has no automated check command, so put your tests where the project's normal test "
+               "command discovers them.")
+    return f"""[OmniCLI red-team test assignment]
+You are an independent adversarial test engineer. Another agent implemented this task:
+{task.title}
+
+Inspect the current project and add focused automated tests that try to expose bugs, edge cases,
+security mistakes, and regressions in this implementation. Do not edit or fix implementation files.
+Only add or change test files. Do not delete existing tests. Use the project's existing test framework
+and conventions. Do not install packages or run destructive commands. Work only inside {workspace}.
+
+{how}
+
+Acceptance criteria: add meaningful tests that fail for plausible defects and pass for correct behavior.
+"""
+
+
 def first_line(text: str, limit: int = 140) -> str:
     for line in (text or "").splitlines():
         line = line.strip(" -*\t")
@@ -1083,17 +1109,7 @@ class Conductor:
         if not self._reserve_call():
             self.say(f"{BADGE_WARN} {task.id}: session budget reached; skipping red-team tests")
             return
-        prompt = f"""[OmniCLI red-team test assignment]
-You are an independent adversarial test engineer. Another agent implemented this task:
-{task.title}
-
-Inspect the current project and add focused automated tests that try to expose bugs, edge cases,
-security mistakes, and regressions in this implementation. Do not edit or fix implementation files.
-Only add or change test files. Do not delete existing tests. Use the project's existing test framework
-and conventions. Do not install packages or run destructive commands. Work only inside {workspace}.
-
-Acceptance criteria: add meaningful tests that fail for plausible defects and pass for correct behavior.
-"""
+        prompt = build_red_team_prompt(task, workspace)
         spec = self.specs[reviewer]
         run = ag.run_agent(spec, prompt, "edit", str(workspace), timeout=self.cfg.task_timeout_min * 60,
                            log_path=self.logs / f"{task.id}-red-team-{reviewer}-{len(task.attempts) + 1}.md",
