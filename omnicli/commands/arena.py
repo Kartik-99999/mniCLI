@@ -137,7 +137,7 @@ def run_arena(ref, task_id, agent_names, lead=None):
 Several independent implementations of the same task were built in isolated copies. The candidates are
 anonymized; do not guess who wrote them. Choose the best implementation based on correctness, maintainability,
 and the listed verification result. Prefer a passing candidate. If none pass, return winner as an empty string.
-Reply only with JSON: {"winner":"A","reason":"short explanation"}.
+Reply only with JSON: {{"winner":"A","reason":"short explanation"}}.
 
 TASK: {} — {}
 {}
