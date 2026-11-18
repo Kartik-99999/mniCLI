@@ -119,10 +119,15 @@ class TeamConfig:
     resume: bool = False
     confirm_saved_plan: bool = False
     recheck: bool = False
-    # per-agent model / reasoning effort, e.g. {"claude": "opus"}; ignored (with a warning)
+    # Worker models / reasoning effort, e.g. {"claude": "sonnet"}; ignored (with a warning)
     # for agents whose adapter has no verified flag for it
     models: Dict[str, str] = field(default_factory=dict)
+    # Optional per-agent model used for lead planning/review; absent entries inherit `models`.
+    # The value "default" explicitly asks the CLI to use its own default model.
+    lead_models: Dict[str, str] = field(default_factory=dict)
     effort: Dict[str, str] = field(default_factory=dict)
+    # A lead can use a different model from its worker role, so its tier is separate too.
+    lead_effort: Dict[str, str] = field(default_factory=dict)
     # budgets for this session: AI calls (lead + workers) and wall-clock minutes; 0 = unlimited
     max_calls: int = 0
     max_minutes: float = 0.0
@@ -163,6 +168,21 @@ def paths_overlap(a: List[str], b: List[str]) -> bool:
             if px[:n] == py[:n]:
                 return True
     return False
+
+
+def protected_scope_conflicts(tasks: List[Task], protected_paths: List[str]) -> List[str]:
+    """Find planned tasks that could overwrite files already being edited outside this run."""
+    if not protected_paths:
+        return []
+    issues = []
+    for task in tasks:
+        if not task.owns:
+            issues.append("{} has whole-project scope (owns is empty) while other work is active".format(task.id))
+            continue
+        conflicts = [path for path in protected_paths if paths_overlap(task.owns, [path])]
+        if conflicts:
+            issues.append("{} owns protected path(s): {}".format(task.id, ", ".join(conflicts[:8])))
+    return issues
 
 
 def classify_task(text: str) -> str:
@@ -304,6 +324,34 @@ def list_tree(root: Path, max_entries: int = 150, max_depth: int = 4) -> str:
     return "\n".join(lines) if lines else "(empty directory)"
 
 
+def uncommitted_paths(root: Path, limit: Optional[int] = None) -> List[str]:
+    """List user/other-agent changes so the lead can keep its plan out of their files."""
+    try:
+        result = subprocess.run(["git", "status", "--porcelain", "-z", "--untracked-files=all"],
+                                cwd=str(root), capture_output=True, text=True, timeout=5)
+    except Exception:
+        return []
+    if result.returncode:
+        return []
+    records = result.stdout.split("\0")
+    found = []
+    index = 0
+    while index < len(records):
+        record = records[index]
+        index += 1
+        if len(record) < 4 or record[2] != " ":
+            continue
+        path = record[3:].replace("\\", "/")
+        if path and not (path == ".omnicli" or path.startswith(".omnicli/")):
+            found.append(path)
+        if "R" in record[:2] or "C" in record[:2]:
+            if index < len(records) and records[index]:
+                found.append(records[index].replace("\\", "/"))
+                index += 1
+    paths = list(dict.fromkeys(found))
+    return paths if limit is None else paths[:max(0, int(limit))]
+
+
 PY_MODULES = ["pytest"]
 
 
@@ -326,6 +374,8 @@ def missing_dependency(code: int, out: str, project_dir: Path) -> str:
     """Explain a verify failure caused by the machine (tool/module not installed) rather than by the code."""
     if code == 0 or not out:
         return ""
+    if "sandbox-exec: sandbox_apply: Operation not permitted" in out:
+        return "macOS sandbox could not launch the verification command"
     m = re.search(r"No module named '?([A-Za-z0-9_.]+)'?", out)
     if m:
         root = m.group(1).split(".")[0]
@@ -376,10 +426,16 @@ def resolve_add_dirs(dirs: Optional[List[str]]) -> List[str]:
 # --------------------------------------------------------------------------- prompts
 
 def _workers_block(specs: Dict[str, Dict], workers: List[str]) -> str:
-    return "\n".join(
-        f"- {w}: {specs[w].get('name', w)} - strengths: {specs[w].get('strengths', 'general coding')}"
-        for w in workers
-    )
+    rows = []
+    for w in workers:
+        spec = specs[w]
+        row = f"- {w}: {spec.get('name', w)} - strengths: {spec.get('strengths', 'general coding')}"
+        row += f"; worker model: {spec.get('_model') or 'CLI default'}"
+        row += f"; worker effort: {spec.get('_effort') or 'CLI default'}"
+        if spec.get("_lead_model"):
+            row += "; lead model: " + ("CLI default" if spec["_lead_model"] == "default" else spec["_lead_model"])
+        rows.append(row)
+    return "\n".join(rows)
 
 
 TASK_JSON_SHAPE = (
@@ -392,7 +448,8 @@ TASK_JSON_SHAPE = (
 
 def build_plan_prompt(goal: str, project_dir: Path, specs: Dict[str, Dict], workers: List[str],
                       tools: List[str], max_tasks: int, missing: Optional[List[str]] = None,
-                      skill_recommendations: Optional[Dict[str, Dict]] = None) -> str:
+                      skill_recommendations: Optional[Dict[str, Dict]] = None,
+                      protected_paths: Optional[List[str]] = None) -> str:
     skill_rows = []
     for category, row in sorted((skill_recommendations or {}).items()):
         first = int(row.get("first_try", 0))
@@ -401,6 +458,10 @@ def build_plan_prompt(goal: str, project_dir: Path, specs: Dict[str, Dict], work
         skill_rows.append("- {}: {} {}/{} approved first try; average {:.1f} revisions, {:.1f} min".format(
             category, row.get("agent", ""), first, count, float(row.get("avg_revisions", 0)), minutes))
     performance = "\n".join(skill_rows) or "(not enough completed task history yet)"
+    protected = list(protected_paths or [])
+    protected_lines = ["- " + path for path in protected[:120]]
+    if len(protected) > 120:
+        protected_lines.append("- ... and {} more paths (all remain protected)".format(len(protected) - 120))
     return f"""[OmniCLI team - planning]
 You are the LEAD ENGINEER of a team of AI coding agents. Each agent is a separate command-line tool on this computer.
 Right now your only job is to break the project goal into tasks and assign each task to a worker.
@@ -412,6 +473,9 @@ PROJECT GOAL:
 PROJECT DIRECTORY: {project_dir}
 Current contents:
 {list_tree(project_dir)}
+
+CHANGED FILES OWNED BY THE USER OR OTHER ACTIVE AGENTS:
+{chr(10).join(protected_lines) or '(none detected)'}
 
 WORKERS (assign every task to one of these ids):
 {_workers_block(specs, workers)}
@@ -427,6 +491,15 @@ RULES:
 - Use the FEWEST tasks that make sense, at most {max_tasks}: a small script or library needs 2-4 tasks, a full-stack
   app maybe 6-10. Each must be doable by one agent in one session (about 5-20 minutes of work). Every extra task
   costs a worker run plus a lead review, so don't split work that one agent can do well in one go.
+- Translate the user's requested outcome into concrete, user-visible behaviors. Give every task specific acceptance
+  criteria that describe what a person can do and observe, not just which files should exist. For broad product goals,
+  cover the main workflows from start to finish and reserve time for integration and usability fixes.
+- For user-facing applications, treat visual quality as part of completion: specify a coherent layout, hierarchy,
+  typography, spacing, responsive behavior, accessible controls, and intentional empty/error states. Do not accept a
+  bare canvas or a row of inert controls as a finished product.
+- Do not silently shrink the goal into a toy demo. Avoid placeholder screens, controls with no working action, and
+  claims that a feature is complete when only its simplest slice exists. If the full request cannot fit the task or
+  round limits, state the reduced scope and leave the missing requirements for final follow-up work.
 - Instructions must be self-contained: a worker sees only the goal, its own task and one-line summaries of finished tasks.
   Name concrete files, functions, endpoints, data shapes and conventions so separate workers' pieces fit together.
 - Match tasks to worker strengths and spread the work across workers.
@@ -435,6 +508,11 @@ RULES:
 - depends_on: ids of tasks that must finish first.
 - owns: the files/directories the task will create or modify (relative paths). Tasks that could run at the same time
   must not share paths. Use [] if the task touches many places - it will then run alone.
+- Treat the changed files listed above as protected work from the user or another active agent. Do not include
+  those paths or their parent directories in task ownership, and do not edit them. If the goal depends on one,
+  call out the coordination need and leave that work unassigned until it is no longer protected.
+- While any protected paths are listed, every task must have explicit, narrow `owns` paths. A whole-project
+  `owns: []` task is rejected because it cannot be kept away from another active agent's files.
 - verify: optional command that exits 0 only when the task is done correctly, using installed tools
   (e.g. "python3 -m unittest -v test_app" or "npm test"). Use "" when no automated check makes sense.
   It runs on the user's machine, so it MUST be a plain test invocation: a test/build tool or read-only
@@ -458,7 +536,9 @@ def build_worker_prompt(task: Task, goal: str, project_dir: Path, agent_name: st
                         all_tasks: List[Task], feedback: str = "", revision: int = 0,
                         previous_agents: Optional[List[str]] = None,
                         extra_dirs: Optional[List[str]] = None,
-                        team_memory: Optional[List[Dict]] = None) -> str:
+                        team_memory: Optional[List[Dict]] = None,
+                        model: str = "", effort: str = "",
+                        protected_paths: Optional[List[str]] = None) -> str:
     board = []
     for t in all_tasks:
         if t.id == task.id:
@@ -467,7 +547,7 @@ def build_worker_prompt(task: Task, goal: str, project_dir: Path, agent_name: st
             board.append(f"- {t.id} [done by {t.agent_used or t.assignee}] {t.title} - {first_line(t.summary)}")
         else:
             board.append(f"- {t.id} [{t.status}, {t.assignee}] {t.title}")
-    owns = ", ".join(task.owns) if task.owns else "(whole project - no other agent is working while you run)"
+    owns = ", ".join(task.owns) if task.owns else "(whole project - no other OmniCLI task runs alongside you)"
     parts = [
         f"[OmniCLI team - task assignment]",
         f"You are {agent_name}, a member of an AI engineering team coordinated by OmniCLI. "
@@ -485,6 +565,12 @@ def build_worker_prompt(task: Task, goal: str, project_dir: Path, agent_name: st
         f"Acceptance criteria: {task.acceptance or 'the instructions above are fully implemented and working'}",
         f"Files/dirs you own: {owns}",
     ]
+    if protected_paths:
+        parts += ["", "PROTECTED FILES already being edited by the user or another active agent:",
+                  "Do not modify these paths or any parent directory that contains them:",
+                  *["- " + path for path in protected_paths]]
+    if model or effort:
+        parts.append(f"Runtime selection: model {model or 'CLI default'}; reasoning effort {effort or 'CLI default'}.")
     if task.owns:
         parts.append("Other agents may be editing other paths at the same time - avoid editing files outside yours unless strictly necessary.")
     if task.verify:
@@ -503,6 +589,11 @@ def build_worker_prompt(task: Task, goal: str, project_dir: Path, agent_name: st
         "RULES:",
         f"- Work only inside {project_dir}." if not extra_dirs else
         f"- Work only inside {project_dir} and these extra directories you were given access to: {', '.join(extra_dirs)}.",
+        "- Implement the requested behavior, not a visual placeholder or a control that only looks interactive. "
+        "If any acceptance criterion cannot be completed, say exactly what remains unfinished.",
+        "- For user-facing UI, deliver a cohesive, finished screen: intentional hierarchy and spacing, responsive "
+        "layout, readable type, accessible focus/labels, meaningful empty states, and working controls. A blank "
+        "canvas is complete only when that is the intended state and the next action is clear.",
         "- Do not run git commit/push - OmniCLI checkpoints the work itself. Do not start servers that keep running.",
         "- Never install anything outside the project: no `pip install` into the system or user Python (no --user, no sudo),"
         " no `npm -g`, no brew. Project-local installs are fine (a .venv inside the project, `npm install` in the project)."
@@ -547,7 +638,19 @@ VERIFICATION (run by OmniCLI - you are read-only and cannot run commands yoursel
 {vblock}
 
 Approve when the task meets its acceptance criteria well enough for the project to move on. Ask for a revision
-only for concrete, fixable problems, and say exactly what to change.{" This is the last allowed revision round: approve unless the work is clearly broken." if last_chance else ""}
+only for concrete, fixable problems, and say exactly what to change.{" This is the last allowed revision round. Do not approve if acceptance criteria are still missing; OmniCLI will report the task as incomplete." if last_chance else ""}
+
+QUALITY REVIEW:
+- Inspect the changed implementation; a worker summary and passing tests are not enough by themselves.
+- Check that each claimed feature has a real working path through the product. For user interfaces, look for
+  placeholder-only screens, inert controls, missing save/load or error states, and obvious gaps in the requested
+  workflow. For libraries and commands, check that the public behavior matches the request and handles ordinary
+  edge cases.
+- For UI tasks, judge the screen as a whole: visual hierarchy, spacing, typography, responsive layout, accessible
+  controls, and meaningful empty states. If a browser or screenshot is available, inspect it; otherwise assess the
+  implementation and don't claim visual verification that did not happen.
+- Do not approve a feature just because its component, file, or button exists. If a concrete acceptance criterion
+  is missing, request a focused revision and name the user-visible behavior that is absent.
 
 Reply with ONLY a JSON object:
 {{"verdict": "approve" or "revise", "feedback": "precise instructions for the worker if revise, else empty", "summary": "one line describing what was delivered"}}
@@ -565,6 +668,31 @@ def format_checks(checks: List[Tuple[str, Tuple[int, str, str]]]) -> str:
             tail = " | ".join(l.strip() for l in out.strip().splitlines()[-3:] if l.strip())[:300]
             lines.append(f"- `{cmd}` -> {'PASS' if code == 0 else f'FAIL (exit {code})'}" + (f": {tail}" if tail and code else ""))
     return "\n".join(lines)
+
+
+def enforce_completion_gate(data: Dict, tasks: List[Task],
+                            checks: List[Tuple[str, Tuple[int, str, str]]]) -> Dict:
+    """Do not report a complete project when a task or runnable required check failed."""
+    result = dict(data or {})
+    issues = []
+    unfinished = [f"{t.id} ({t.status})" for t in tasks if t.status != "done"]
+    if unfinished:
+        issues.append("Tasks did not finish successfully: " + ", ".join(unfinished))
+    failed = []
+    for command, (code, _output, missing) in checks:
+        if code != 0 and not missing and command not in failed:
+            failed.append(command)
+    if failed:
+        issues.append("Required verification failed: " + ", ".join(f"`{cmd}`" for cmd in failed))
+    if issues:
+        result["complete"] = False
+        result["remaining_issues"] = list(result.get("remaining_issues") or [])
+        for issue in issues:
+            if issue not in result["remaining_issues"]:
+                result["remaining_issues"].append(issue)
+        if not result.get("summary"):
+            result["summary"] = "The project still has unfinished work."
+    return result
 
 
 def build_final_prompt(goal: str, project_dir: Path, tasks: List[Task], workers: List[str],
@@ -595,6 +723,18 @@ TASK RESULTS:
 AUTOMATED CHECKS - OmniCLI just re-ran every task's verify command on the current project state.
 You are read-only and cannot run commands yourself; treat these results as having been executed:
 {format_checks(checks or [])}
+
+COMPLETION BAR:
+- Compare the delivered product directly against every capability and workflow in the user's original goal.
+  Task statuses, summaries, commits, and passing tests are evidence, but none proves the goal is complete by itself.
+- Judge the actual user experience and integration. A screen that renders but has inert or placeholder controls,
+  a spreadsheet that only looks like a grid, or a presentation that only shows a title is not a complete editor.
+  Name specific missing or shallow behaviors as remaining issues and create follow-up tasks for them when possible.
+- Report complete=true only when the requested core workflows work end to end and no required feature is still a
+  stub or materially below the requested scope. If the goal was intentionally reduced to an MVP, disclose that
+  plainly and report complete=false unless the user asked for an MVP.
+- A failed required verification command or any task that did not finish successfully means the project is not
+  complete, even if other checks pass.
 
 WORKERS:
 {_workers_block(specs, workers)}
@@ -664,6 +804,7 @@ class Conductor:
         self.tasks: List[Task] = []
         self.plan_summary = ""
         self.project_name = ""
+        self.protected_paths: List[str] = []
         self.lead: str = ""
         self.workers: List[str] = []
         self.healthy: List[str] = []
@@ -700,20 +841,35 @@ class Conductor:
         """
         self.specs = {n: dict(s) for n, s in self.specs.items()}
         for kind, values, args_key, slot in (("model", self.cfg.models, "model_args", "_model"),
-                                             ("effort", self.cfg.effort, "effort_args", "_effort")):
+                                             ("lead model", self.cfg.lead_models, "model_args", "_lead_model"),
+                                             ("effort", self.cfg.effort, "effort_args", "_effort"),
+                                             ("lead effort", self.cfg.lead_effort, "effort_args", "_lead_effort")):
             for name, value in (values or {}).items():
                 value = str(value or "").strip()
                 if not value:
                     continue
                 key = name if name in self.specs else str(name).lower()
                 spec = self.specs.get(key)
+                effort_model = spec.get("_model") if spec else None
+                if kind == "lead effort" and spec:
+                    effort_model = spec.get("_lead_model", effort_model)
+                    if effort_model == "default":
+                        effort_model = None
                 if spec is None:
                     self._option_warnings.append(f"{kind} '{value}' for '{name}' ignored: no AI CLI with that id")
+                elif kind == "lead model" and value.lower() == "default":
+                    spec[slot] = "default"
                 elif not spec.get(args_key):
                     self._option_warnings.append(f"{key} has no supported way to set a {kind}; ignoring {kind} '{value}'")
-                elif kind == "effort" and spec.get("effort_levels") and value not in spec["effort_levels"]:
-                    self._option_warnings.append(f"effort '{value}' ignored for {key}: it accepts "
-                                                 f"{', '.join(spec['effort_levels'])}")
+                elif kind in ("effort", "lead effort") and not ag.effort_supported(
+                        spec, effort_model, value):
+                    levels = ag.effort_levels(spec, effort_model)
+                    if key == "codex" and effort_model:
+                        reason = (f"catalog support was not confirmed for model '{effort_model}'; "
+                                  "run `omnicli models codex --refresh` to refresh it")
+                    else:
+                        reason = "it accepts " + (", ".join(levels) if levels else "only the CLI default")
+                    self._option_warnings.append(f"{kind} '{value}' ignored for {key}: {reason}")
                 else:
                     spec[slot] = value
         if self.add_dirs:
@@ -728,9 +884,29 @@ class Conductor:
         for w in self._option_warnings:
             self.say(f"{BADGE_WARN} {w}")
         self._option_warnings = []  # warn once
-        chosen = [f"{n}: " + " ".join(x for x in (s.get("_model"), s.get("_effort") and f"effort {s['_effort']}") if x)
-                  for n, s in self.specs.items()
-                  if (n == self.lead or n in self.workers) and (s.get("_model") or s.get("_effort"))]
+        chosen = []
+        for n, spec in self.specs.items():
+            if n != self.lead and n not in self.workers:
+                continue
+            parts = []
+            if n in self.workers and spec.get("_model"):
+                parts.append("worker model " + spec["_model"])
+            if n == self.lead and spec.get("_lead_model"):
+                parts.append("lead model " + ("CLI default" if spec["_lead_model"] == "default" else spec["_lead_model"]))
+            elif n == self.lead and spec.get("_model"):
+                parts.append("lead inherits worker model " + spec["_model"])
+            if n in self.workers and spec.get("_effort"):
+                parts.append("worker effort " + spec["_effort"])
+            if n == self.lead:
+                if spec.get("_lead_effort"):
+                    parts.append("lead effort " + spec["_lead_effort"])
+                elif spec.get("_lead_model") == "default" or (
+                        spec.get("_lead_model") and spec.get("_lead_model") != spec.get("_model")):
+                    parts.append("lead effort CLI default")
+                elif spec.get("_effort"):
+                    parts.append("lead inherits worker effort " + spec["_effort"])
+            if parts:
+                chosen.append(f"{n}: " + ", ".join(parts))
         if chosen:
             self.say(f"{BADGE_INFO} Agent options: {'; '.join(chosen)}")
         if self.add_dirs:
@@ -829,6 +1005,7 @@ class Conductor:
                 "updated_at": time.time(),
                 "phase": self.phase,
                 "pid": os.getpid() if self.phase in ("planning", "running") else 0,
+                "protected_paths": self.protected_paths,
                 "tasks": [asdict(t) for t in self.tasks],
             }
             tmp = self.state_path.with_suffix(".tmp")
@@ -860,6 +1037,7 @@ class Conductor:
         self.final = data.get("final") or {}
         self.started_at = data.get("started_at", time.time())
         self.phase = data.get("phase", "planned")
+        self.protected_paths = [str(path) for path in data.get("protected_paths", []) if isinstance(path, str)]
         self.tasks = [Task.from_dict(t) for t in data.get("tasks", [])]
         for t in self.tasks:
             if t.status == "running":
@@ -900,6 +1078,21 @@ class Conductor:
         has_head = self._git("rev-parse", "--verify", "-q", "HEAD").returncode == 0
         dirty = bool(self._git("status", "--porcelain", "--", ".").stdout.strip())
         if dirty:
+            if self.cfg.use_worktrees and self.protected_paths:
+                if not has_head:
+                    self.git = False
+                    self.say(f"{BADGE_FAILED} Active edits are protected, but isolated worktrees need an existing Git commit.")
+                    self.say(c_dim("Create a commit before starting the team, or wait until the active edits are finished."))
+                    return
+                current_paths = uncommitted_paths(self.dir)
+                unknown = [path for path in current_paths if path not in self.protected_paths]
+                if unknown:
+                    self.git = False
+                    self.say(f"{BADGE_FAILED} New files appeared after the plan; refusing to baseline-commit them automatically.")
+                    self.say(c_dim("Re-plan so OmniCLI can protect the latest edits."))
+                    return
+                self.say(f"{BADGE_INFO} Leaving {len(current_paths)} protected path(s) untouched in the main checkout; workers will use isolated worktrees from HEAD.")
+                return
             files = [line[len("add '"):-1] if line.startswith("add '") else line
                      for line in self._git("add", "-A", "--dry-run", "--", ".").stdout.splitlines() if line.strip()]
             if created or not has_head:
@@ -930,8 +1123,19 @@ class Conductor:
             return False
         return ans in ("y", "yes")
 
+    def _refresh_protected_paths(self) -> List[str]:
+        """Add files changed since planning and report any newly conflicting task scopes."""
+        current = uncommitted_paths(self.dir)
+        new_paths = [path for path in current if path not in self.protected_paths]
+        if new_paths:
+            self.protected_paths = list(dict.fromkeys(self.protected_paths + new_paths))
+        return protected_scope_conflicts(self.tasks, new_paths)
+
     def _changed_files(self, scope: Optional[List[str]]) -> List[str]:
-        self._git("add", "-A", "--", ".")
+        # Stage only the task's declared paths. `git add -A .` also stages files that
+        # another person or process may be editing in this shared checkout.
+        pathspec = [":(literal)" + path for path in scope] if scope else ["."]
+        self._git("add", "-A", "--", *pathspec)
         out = self._git("diff", "--cached", "--name-only", "--relative", "--", ".").stdout
         files = [f for f in out.splitlines() if f.strip()]
         if scope is not None:
@@ -946,7 +1150,8 @@ class Conductor:
             files = self._changed_files(scope)
             if not files:
                 return [], ""
-            spec = files if len(files) <= 300 else ["."]
+            spec = files if len(files) <= 300 else (scope or ["."])
+            spec = [":(literal)" + path for path in spec] if scope else spec
             stat = self._git("diff", "--cached", "--stat", "--relative", "--", *spec).stdout
             diff = self._git("diff", "--cached", "--relative", "--", *spec).stdout
         if len(diff) > MAX_DIFF_CHARS:
@@ -963,9 +1168,13 @@ class Conductor:
             existing = Path(task.workspace)
             if existing.is_dir() and (existing / ".git").exists():
                 return existing
-        dirty = self._git("status", "--porcelain", "--", ".").stdout.strip()
-        if dirty:
-            raise RuntimeError("isolated workspaces need a clean project tree; commit or stash project changes first")
+        dirty_paths = uncommitted_paths(self.dir)
+        if dirty_paths:
+            unexpected = [path for path in dirty_paths if path not in self.protected_paths]
+            conflicts = protected_scope_conflicts([task], dirty_paths)
+            if unexpected or conflicts:
+                raise RuntimeError("isolated workspace cannot start: project files changed after planning or overlap "
+                                   "this task's owned paths")
         workspace = self.state_dir / "worktrees" / task.id
         workspace.parent.mkdir(parents=True, exist_ok=True)
         with self.git_lock:
@@ -988,7 +1197,7 @@ class Conductor:
         add = subprocess.run(["git", "add", "-A"], cwd=str(workspace), capture_output=True, text=True)
         if add.returncode:
             return [], "", ""
-        pathspec = scope if scope else ["."]
+        pathspec = [":(literal)" + path for path in scope] if scope else ["."]
         files = subprocess.run(["git", "diff", "--cached", "--name-only", "--relative", "HEAD", "--"] + pathspec,
                                cwd=str(workspace), capture_output=True, text=True).stdout.splitlines()
         diff = subprocess.run(["git", "diff", "--cached", "--stat", "--relative", "HEAD", "--"] + pathspec,
@@ -1194,7 +1403,24 @@ class Conductor:
                 with self.lock:
                     self._lead_calls += 1
                     n = self._lead_calls
-                run = ag.run_agent(self.specs[name], p, "readonly", str(self.dir),
+                spec = self.specs[name]
+                lead_model = spec.get("_lead_model")
+                lead_effort = spec.get("_lead_effort")
+                if lead_model is not None or lead_effort is not None:
+                    spec = dict(spec)
+                    worker_model = spec.get("_model")
+                    if lead_model == "default":
+                        spec.pop("_model", None)
+                        if lead_effort is None:
+                            spec.pop("_effort", None)
+                    else:
+                        if lead_model:
+                            spec["_model"] = lead_model
+                        if lead_effort is None and lead_model and lead_model != worker_model:
+                            spec.pop("_effort", None)
+                    if lead_effort is not None:
+                        spec["_effort"] = lead_effort
+                run = ag.run_agent(spec, p, "readonly", str(self.dir),
                                    timeout=self.cfg.lead_timeout_min * 60,
                                    log_path=self.logs / f"lead-{n:03d}-{kind}-{name}.md",
                                    meta={"kind": kind, "run_dir": str(self.dir)})
@@ -1235,17 +1461,32 @@ class Conductor:
         plan_specs = dict(self.specs)
         if self.cfg.human_worker:
             plan_specs["human"] = {"name": "You", "strengths": "product judgment, hands-on implementation, and domain knowledge"}
+        self.protected_paths = uncommitted_paths(self.dir)
         prompt = build_plan_prompt(self.goal, self.dir, plan_specs, self.workers, have, self.cfg.max_tasks, missing,
-                                   ledger.skill_recommendations())
-        data = self.ask_lead("plan", prompt, "tasks")
-        if not data or not isinstance(data.get("tasks"), list) or not data["tasks"]:
-            if not self.budget_reason:
-                self.say(f"{BADGE_FAILED} The lead did not return a usable plan. Raw replies are in {self.logs}")
-            return False
-        self.project_name = str(self.cfg.project_name or "").strip() or str(data.get("project_name") or self.dir.name)
-        self.plan_summary = str(data.get("summary") or "")
+                                   ledger.skill_recommendations(), self.protected_paths)
         plan_workers = list(self.workers) + (["human"] if self.cfg.human_worker else [])
-        self.tasks = normalize_tasks(data["tasks"], plan_workers, max_tasks=self.cfg.max_tasks, round_no=1)
+        for attempt in range(2):
+            data = self.ask_lead("plan", prompt, "tasks")
+            if not data or not isinstance(data.get("tasks"), list) or not data["tasks"]:
+                if not self.budget_reason:
+                    self.say(f"{BADGE_FAILED} The lead did not return a usable plan. Raw replies are in {self.logs}")
+                return False
+            tasks = normalize_tasks(data["tasks"], plan_workers, max_tasks=self.cfg.max_tasks, round_no=1)
+            conflicts = protected_scope_conflicts(tasks, self.protected_paths)
+            if not conflicts:
+                self.tasks = tasks
+                self.project_name = (str(self.cfg.project_name or "").strip()
+                                     or str(data.get("project_name") or self.dir.name))
+                self.plan_summary = str(data.get("summary") or "")
+                break
+            if attempt:
+                self.say(f"{BADGE_FAILED} Plan still overlaps files already being edited: " + "; ".join(conflicts))
+                self.say(c_dim("No tasks were started. Coordinate with the other editor or ask for a plan that avoids those paths."))
+                return False
+            self.say(f"{BADGE_WARN} The plan overlaps files already being edited; asking the lead to re-plan around them.")
+            prompt += ("\n\nPLAN REJECTED FOR FILE OWNERSHIP CONFLICTS. Do not reuse the conflicting scopes. "
+                       "Return a complete corrected plan with explicit, narrow `owns` paths for every task. "
+                       "Conflict details: " + "; ".join(conflicts))
         self.save_state()
         return bool(self.tasks)
 
@@ -1253,6 +1494,11 @@ class Conductor:
         tasks = tasks if tasks is not None else self.tasks
         if self.plan_summary and tasks is self.tasks:
             self.say(f"\n{c_bold('Approach:')} {self.plan_summary}")
+        if tasks is self.tasks and self.protected_paths:
+            if self.cfg.use_git:
+                self.say(f"{BADGE_INFO} Detected {len(self.protected_paths)} active-edit path(s). OmniCLI will preserve them and run worker tasks in isolated Git worktrees.")
+            else:
+                self.say(f"{BADGE_WARN} Detected {len(self.protected_paths)} active-edit path(s). Git checkpoints are required to isolate worker tasks safely.")
         rows = []
         for t in tasks:
             rows.append([
@@ -1585,7 +1831,9 @@ class Conductor:
                                          feedback=feedback, revision=revision,
                                          previous_agents=[a for a in tried if a != agent],
                                          extra_dirs=spec.get("_add_dirs") or None,
-                                         team_memory=ledger.read_team_memory(t.category, project=str(self.dir)))
+                                         team_memory=ledger.read_team_memory(t.category, project=str(self.dir)),
+                                         model=spec.get("_model", ""), effort=spec.get("_effort", ""),
+                                         protected_paths=self.protected_paths)
 
             def on_line(line: str, _label=label, _tid=t.id):
                 with self.lock:
@@ -1642,9 +1890,9 @@ class Conductor:
                 badge = BADGE_SUCCESS if verify[0] == 0 else BADGE_FAILED
                 self.say(f"  {badge} verify `{t.verify}` -> exit {verify[0]}")
 
-            with self.lock:
-                others_running = any(tid != t.id for tid in self.running)
-            scope = t.owns if (others_running and t.owns) else None
+            # Even serial tasks review and checkpoint only their declared scope. This
+            # keeps unrelated or concurrent edits out of a task's checkpoint.
+            scope = t.owns or None
             if workspace == self.dir:
                 files, changes = self.collect_changes(scope)
             else:
@@ -1718,18 +1966,15 @@ class Conductor:
                 t.attempts.append(attempt)
 
             if approved or revision >= self.cfg.retries:
-                verify_ok = verify_passed(verify)
                 with self.lock:
                     t.agent_used = agent
                     t.summary = str(verdict.get("summary") or "") + ("\n" + summary if summary else "")
                     if approved:
                         t.status = "done"
-                    elif verify_ok:
-                        t.status = "done"
-                        t.review_note = f"accepted with reservations: {feedback}"
                     else:
                         t.status = "failed"
-                        t.review_note = f"verify still failing after {revision + 1} attempts: {feedback}"
+                        t.review_note = f"lead still requested changes after {revision + 1} attempt(s): " + (
+                            feedback or "acceptance criteria remain unmet")
                     t.duration_sec = time.time() - start
                 label_txt = "" if approved else ("[with reservations]" if t.status == "done" else "[needs work]")
                 t.commit = (self._checkpoint_workspace(t, workspace, scope, label_txt)
@@ -1764,11 +2009,11 @@ class Conductor:
             checks), "complete")
         if data is None:
             all_done = all(t.status == "done" for t in self.tasks)
-            return {"complete": all_done, "summary": "Final review unavailable; status based on task results.",
+            data = {"complete": all_done, "summary": "Final review unavailable; status based on task results.",
                     "how_to_run": "", "remaining_issues": [], "followup_tasks": []}
-        if not can_add:
+        elif not can_add:
             data["followup_tasks"] = []
-        return data
+        return enforce_completion_gate(data, self.tasks, checks)
 
     # ---------------------------------------------------------------- report
     def write_report(self) -> Path:
@@ -1869,7 +2114,27 @@ class Conductor:
                 if self.cfg.plan_only:
                     return 0
 
+            conflicts = self._refresh_protected_paths()
+            if conflicts:
+                self.phase = "planned"
+                self.save_state()
+                self.say(f"{BADGE_FAILED} Files changed while the plan was waiting for approval, and the plan now overlaps them: "
+                         + "; ".join(conflicts))
+                self.say(c_dim("No tasks were started. Re-plan after the other edits finish."))
+                return 1
+            if self.protected_paths:
+                if not self.cfg.use_git:
+                    self.phase = "planned"
+                    self.save_state()
+                    self.say(f"{BADGE_FAILED} Active edits are protected. Enable Git checkpoints to run workers in isolated worktrees, or wait until those edits finish.")
+                    return 1
+                self.cfg.use_worktrees = True
             self.setup_git()  # after approval: nothing is created or committed for a plan you decline
+            if self.cfg.use_worktrees and not self.git:
+                self.phase = "planned"
+                self.save_state()
+                self.say(f"{BADGE_FAILED} Could not create isolated Git worktrees. The project was left unchanged.")
+                return 1
             self.phase = "running"
             self.save_state()
             while True:
@@ -1895,6 +2160,15 @@ class Conductor:
                                       existing_ids=[t.id for t in self.tasks], prefix=f"r{self.round}-t",
                                       max_tasks=self.cfg.max_tasks, round_no=self.round)
                 if not new:
+                    break
+                conflicts = protected_scope_conflicts(new, self.protected_paths)
+                if conflicts:
+                    issue = ("Follow-up work was not started because it overlaps files already being edited: "
+                             + "; ".join(conflicts))
+                    self.final["complete"] = False
+                    self.final["remaining_issues"] = list(self.final.get("remaining_issues") or []) + [issue]
+                    self.say(f"{BADGE_WARN} {issue}")
+                    self.save_state()
                     break
                 self.tasks.extend(new)
                 self.save_state()

@@ -8,6 +8,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 os.environ["OMNICLI_HOME"] = tempfile.mkdtemp(prefix="omnicli-test-home-")
 
@@ -73,7 +74,7 @@ class ChatBase(unittest.TestCase):
         return {"id": name, "name": name, "bin": sys.executable, "strengths": "test",
                 "readonly": [str(self.brain), "{prompt_file}", mode], "edit": [str(self.brain), "{prompt_file}", mode]}
 
-    def session(self, inputs, specs=None, project=None, lead=None):
+    def session(self, inputs, specs=None, project=None, lead=None, office_mode="off"):
         it = iter(inputs)
 
         def fake_input(_prompt=""):
@@ -92,13 +93,30 @@ class ChatBase(unittest.TestCase):
 
         return chat.ChatSession(project=project, lead=lead, input_fn=fake_input, out=self.out_lines.append,
                                 specs=specs, health=health, run_cli=run_cli, make_conductor=FakeConductor,
-                                interactive=False)
+                                interactive=False, office_mode=office_mode)
 
     def text(self):
         return "\n".join(str(l) for l in self.out_lines)
 
 
 class TestParsing(unittest.TestCase):
+    def test_slash_command_completion_suggests_local_and_passthrough_commands(self):
+        matches = chat.slash_command_matches("/")
+        self.assertIn("/team", matches)
+        self.assertIn("/status", matches)
+        self.assertIn("/office", matches)
+        self.assertIn("/lead-model", matches)
+        self.assertEqual(chat.slash_command_matches("/off"), ["/office"])
+        self.assertEqual(chat.slash_command_matches("/team custom"), [])
+        self.assertEqual(chat.slash_command_matches("build something"), [])
+        model_index = matches.index("/model")
+        self.assertEqual(chat.choose_slash_completion("/", matches, model_index), "/model ")
+        self.assertIsNone(chat.choose_slash_completion("/model", ["/model", "/models"], 0))
+        self.assertEqual(chat.choose_slash_completion("/model", ["/model", "/models"], 1), "/models ")
+        menu = "\n".join(chat._menu_rows(["/model", "/models"], 0, 80, 24))
+        self.assertIn("choose the model used for worker tasks", menu)
+        self.assertIn("↑/↓ choose", menu)
+
     def test_parse_reply(self):
         r, a = chat.parse_reply('Okay.\nACTION: {"type": "build", "goal": "x", "dir": ""}')
         self.assertEqual(r, "Okay.")
@@ -143,6 +161,26 @@ class TestParsing(unittest.TestCase):
 
 
 class TestSession(ChatBase):
+    def test_office_slash_command_opens_live_view_without_leaving_chat(self):
+        server = object()
+        s = self.session([], project=self.tmp)
+        with mock.patch("omnicli.commands.office.status.resolve_run", return_value=(self.tmp, "")), \
+                mock.patch("omnicli.commands.office.start_background", return_value=(server, "http://127.0.0.1:43210/")), \
+                mock.patch("webbrowser.open") as open_browser:
+            self.assertTrue(s.slash("office"))
+        self.assertIn(server, s._office_servers)
+        open_browser.assert_called_once_with("http://127.0.0.1:43210/")
+        self.assertIn("chat remains available here", self.text())
+
+    def test_changing_other_agents_model_explains_chat_lead(self):
+        specs = {"muse": self.spec("muse"), "codex": self.spec("codex")}
+        s = self.session([], specs=specs, lead="muse")
+        s.lead = "muse"
+        s.ready = ["muse", "codex"]
+        with mock.patch("omnicli.commands.models_cmd.pick_model", return_value="gpt-6-luna"):
+            s.team_command("model", ["codex"])
+        self.assertIn("Chat is still with muse; use /lead codex to switch.", self.text())
+
     def test_plain_chat_and_exit(self):
         s = self.session(["hello there", "/exit", "never reached"])
         self.assertEqual(s.loop(), 0)
@@ -230,6 +268,8 @@ class TestSession(ChatBase):
         self.assertEqual(self.cli_calls, [["status", "-d", d], ["logs", "t2", "-d", d], ["runs"], ["usage", "-d", d]])
         self.assertIn("Unknown command /bogus", self.text())
         self.assertIn("/build <goal>", self.text())
+        self.assertIn("set worker model", self.text())
+        self.assertIn("/lead-model", self.text())
 
     def test_typo_suggests_and_runs_on_yes(self):
         proj = self.tmp / "typo"
@@ -245,6 +285,10 @@ class TestSession(ChatBase):
         self.assertEqual(chat.suggest("ussage", {"usage", "status"}), "usage")
         self.assertEqual(chat.suggest("modle", chat.LOCAL_COMMANDS), "model")
         self.assertIsNone(chat.suggest("xyzzy", {"usage"}))
+
+    def test_office_is_listed_as_a_local_chat_command(self):
+        self.assertIn("office", chat.LOCAL_COMMANDS)
+        self.assertIn("/office [run|path]", chat.HELP)
 
     def test_cli_typo_is_not_passed_to_the_shell(self):
         import contextlib, io
@@ -350,6 +394,78 @@ class TestSession(ChatBase):
             rc = cli.main([])  # not a TTY here -> help, not chat
         self.assertEqual(rc, 0)
         self.assertIn("usage: omnicli", buf.getvalue())
+
+
+
+
+class TestLiveOffice(ChatBase):
+    """Chat starts the live office by itself and prints its local link."""
+
+    def _get(self, url):
+        import json
+        import urllib.request
+        with urllib.request.urlopen(url, timeout=5) as r:
+            return r.status, json.loads(r.read().decode("utf-8"))
+
+    def test_chat_starts_office_shows_link_and_follows_project(self):
+        import json as _json
+        first = Path(tempfile.mkdtemp(prefix="omni-chat-office-"))
+        s = self.session(["/exit"], project=first, office_mode="on")
+        seen = {}
+        real_welcome = s.welcome
+
+        def welcome_and_probe():
+            real_welcome()
+            seen["url"] = s.office_url
+            # no run yet: the team is shown at rest instead of an error
+            code, snap = self._get(s.office_url + "snapshot")
+            seen["idle"] = (code, snap["phase"], [a["id"] for a in snap["agents"]])
+            # the chat moves to a project with a run: the same link now shows that run
+            second = Path(tempfile.mkdtemp(prefix="omni-chat-office-run-"))
+            (second / ".omnicli" / "team").mkdir(parents=True)
+            (second / ".omnicli" / "team" / "state.json").write_text(_json.dumps({
+                "version": 1, "goal": "g", "phase": "running", "pid": os.getpid(), "lead": "brain",
+                "workers": ["brain"], "tasks": []}))
+            s.project = second
+            code, snap = self._get(s.office_url + "snapshot")
+            seen["run"] = (code, snap["phase"])
+
+        s.welcome = welcome_and_probe
+        self.assertEqual(s.loop(), 0)
+        self.assertTrue(seen["url"].startswith("http://127.0.0.1:"))
+        self.assertIn("Live office", self.text())
+        self.assertIn(seen["url"], self.text())
+        self.assertEqual(seen["idle"], (200, "idle", ["brain"]))
+        self.assertEqual(seen["run"], (200, "running"))
+        self.assertIsNone(s.office_url)          # stopped when the chat ends
+        self.assertEqual(s._office_servers, [])
+
+    def test_office_off_starts_nothing(self):
+        s = self.session(["/exit"], office_mode="off")
+        s.loop()
+        self.assertNotIn("Live office", self.text())
+        self.assertEqual(s._office_servers, [])
+
+    def test_open_mode_opens_browser_and_slash_office_reuses_server(self):
+        s = self.session(["/office", "/exit"], office_mode="open")
+        with mock.patch("webbrowser.open", return_value=True) as opened:
+            s.loop()
+        urls = [c.args[0] for c in opened.call_args_list]
+        self.assertEqual(len(urls), 2)               # once at start, once for /office
+        self.assertEqual(urls[0], urls[1])           # /office reused the chat's own server
+        self.assertIn("Live office opened", self.text())
+
+    def test_run_reads_setting_and_no_office_flag(self):
+        import argparse
+        with mock.patch.object(chat.ChatSession, "loop", return_value=0), \
+                mock.patch.object(chat.ChatSession, "__init__", return_value=None) as init:
+            chat.run(argparse.Namespace(dir=None, lead=None, no_office=True))
+            self.assertEqual(init.call_args.kwargs["office_mode"], "off")
+            with mock.patch("omnicli.settings.get", side_effect=lambda k, d=None: "open" if k == "office" else d):
+                chat.run(argparse.Namespace(dir=None, lead=None))
+            self.assertEqual(init.call_args.kwargs["office_mode"], "open")
+            chat.run(argparse.Namespace(dir=None, lead=None))
+            self.assertEqual(init.call_args.kwargs["office_mode"], "on")   # default
 
 
 if __name__ == "__main__":

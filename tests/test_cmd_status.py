@@ -50,10 +50,12 @@ class TTYBuffer(io.StringIO):
         return True
 
 
-def task(tid, title, status_, assignee="claude", agent_used="", tries=0, commit="", duration=0.0):
-    return {"id": tid, "title": title, "assignee": assignee, "instructions": "do it", "depends_on": [],
+def task(tid, title, status_, assignee="claude", agent_used="", tries=0, commit="", duration=0.0,
+         depends_on=None, summary="", review_note=""):
+    return {"id": tid, "title": title, "assignee": assignee, "instructions": "do it",
+            "depends_on": depends_on or [],
             "owns": [], "acceptance": "", "verify": "", "round": 1, "status": status_,
-            "agent_used": agent_used, "summary": "", "review_note": "",
+            "agent_used": agent_used, "summary": summary, "review_note": review_note,
             "attempts": [{"agent": agent_used or assignee, "revision": i, "exit_code": 0, "duration_sec": 1.0,
                           "at": "2026-11-15T10:00:00", "result": "approved"} for i in range(tries)],
             "commit": commit, "duration_sec": duration}
@@ -107,11 +109,13 @@ class StatusBase(unittest.TestCase):
 
     def running_project(self, name="api", pid=None):
         d = self.make_project(name, phase="running", pid=os.getpid() if pid is None else pid, tasks=[
-            task("t1", "Scaffold", "done", agent_used="claude", tries=1, commit="aaaaaaa1", duration=60),
+            task("t1", "Scaffold", "done", agent_used="claude", tries=1, commit="aaaaaaa1", duration=60,
+                 summary="Created the project skeleton."),
             task("t2", "Build the REST endpoints", "running", assignee="agy"),
-            task("t2-2", "Lookalike task", "pending", assignee="claude"),
+            task("t2-2", "Lookalike task", "pending", assignee="claude", depends_on=["t4"]),
             task("t3", "UI", "pending", assignee="muse"),
-            task("t4", "Tests", "failed", agent_used="claude", tries=2, duration=120),
+            task("t4", "Tests", "failed", agent_used="claude", tries=2, duration=120,
+                 review_note="verify still fails: one assertion"),
         ])
         logs = d / ".omnicli" / "team" / "logs"
         prompt = logs / "t2-agy-1.prompt.md"
@@ -179,6 +183,12 @@ class TestTextOutput(StatusBase):
         self.assertNotIn("alpha", out)
         self.assertNotIn("WRONGTASK", out)
         self.assertIn("t2 · agy · attempt 1 · running 1m", out)
+        self.assertIn("Agents", out)
+        self.assertIn("agy (worker) · working · 0/1 tasks done · 1 active", out)
+        self.assertIn("Latest: delta", out)
+        self.assertIn("Done: t1 Scaffold — Created the project skeleton.", out)
+        self.assertIn("Blocker (t4): verify still fails: one assertion", out)
+        self.assertIn("Blocker (t2-2): Waiting for t4", out)
         self.assertNotIn("omnicli resume", out)
 
     def test_running_but_dead_is_interrupted(self):
@@ -220,6 +230,21 @@ class TestTextOutput(StatusBase):
         self.assertIn("(stderr)", out)
         self.assertIn("│ editing api.py", out)
 
+    def test_active_lead_review_is_attached_to_reviewer_agent(self):
+        d = self.running_project()
+        logs = d / ".omnicli" / "team" / "logs"
+        prompt = logs / "lead-001-review-claude.prompt.md"
+        prompt.write_text("[OmniCLI team - review]\nTASK t2: Build the REST endpoints\n", encoding="utf-8")
+        (logs / "lead-001-review-claude.md").write_text("Checking the endpoint diff.\n", encoding="utf-8")
+        snap = status.build_snapshot(d, runs.load_state(d))
+        claude = next(a for a in snap["agents"] if a["id"] == "claude")
+        self.assertEqual(claude["status"], "reviewing")
+        self.assertEqual(claude["reviewing_task"], {"task_id": "t2", "task_title": "Build the REST endpoints",
+                                                     "builder": "agy"})
+        self.assertEqual(claude["latest_output"], "Checking the endpoint diff.")
+        _, out, _ = self.run_status(dir=str(d))
+        self.assertIn("Reviewing: t2 Build the REST endpoints by agy", out)
+
     def test_no_output_yet(self):
         d = self.running_project()
         logs = d / ".omnicli" / "team" / "logs"
@@ -244,7 +269,7 @@ class TestTextOutput(StatusBase):
 
 class TestJson(StatusBase):
     KEYS = {"dir", "project_name", "goal", "phase", "alive", "interrupted", "lead", "workers", "round",
-            "counts", "tasks", "final"}
+            "counts", "tasks", "agents", "final"}
 
     def test_complete_json(self):
         d = self.complete_project()
@@ -274,6 +299,13 @@ class TestJson(StatusBase):
         self.assertEqual(t2["worker"], "agy")
         self.assertGreaterEqual(t2["duration_sec"], 60)
         self.assertIsNone(data["final"])
+        agy = next(a for a in data["agents"] if a["id"] == "agy")
+        self.assertEqual(agy["current_tasks"], [{"id": "t2", "title": "Build the REST endpoints"}])
+        self.assertEqual(agy["latest_output"], "delta")
+        self.assertEqual(agy["progress"]["total"], 1)
+        claude = next(a for a in data["agents"] if a["id"] == "claude")
+        self.assertIn({"task_id": "t4", "reason": "verify still fails: one assertion"}, claude["blockers"])
+        self.assertEqual(claude["completed_work"][0]["id"], "t1")
 
     def test_dead_json(self):
         d = self.running_project(pid=dead_pid())

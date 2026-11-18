@@ -39,9 +39,13 @@ def add_run_options(p) -> None:
     p.add_argument("--human", action="store_true",
                    help="Let the lead assign tasks to you; complete them in the shown workspace")
     p.add_argument("--model", action="append", metavar="AGENT=MODEL", default=None,
-                   help="Model for one agent, e.g. --model claude=opus (repeatable; default: `models.<agent>` setting)")
+                   help="Worker model for one agent, e.g. --model claude=sonnet (repeatable; default: `models.<agent>` setting)")
+    p.add_argument("--lead-model", action="append", metavar="AGENT=MODEL", default=None,
+                   help="Lead model, e.g. --lead-model claude=opus (repeatable; default: `lead_models.<agent>`, then worker model)")
     p.add_argument("--effort", action="append", metavar="AGENT=LEVEL", default=None,
                    help="Reasoning effort for one agent, e.g. --effort agy=high (repeatable; default: `effort.<agent>`)")
+    p.add_argument("--lead-effort", action="append", metavar="AGENT=LEVEL", default=None,
+                   help="Lead reasoning effort, e.g. --lead-effort codex=xhigh (repeatable; default: compatible worker effort or CLI default)")
     p.add_argument("--max-calls", type=int, default=None, metavar="N",
                    help="Stop after N AI calls this session; progress is saved (0 = no limit)")
     p.add_argument("--max-minutes", type=float, default=None, metavar="M",
@@ -55,11 +59,16 @@ def build_team_config(args, goal: str, project_dir: Path, resume: bool, project_
     """TeamConfig from parsed args + saved settings. Raises ValueError with a user-facing message."""
     from omnicli import conductor as c
 
-    saved_models, saved_effort = settings.get("models"), settings.get("effort")
+    saved_models, saved_lead_models = settings.get("models"), settings.get("lead_models")
+    saved_effort, saved_lead_effort = settings.get("effort"), settings.get("lead_effort")
     models = {str(k): str(v) for k, v in saved_models.items()} if isinstance(saved_models, dict) else {}
+    lead_models = {str(k): str(v) for k, v in saved_lead_models.items()} if isinstance(saved_lead_models, dict) else {}
     effort = {str(k): str(v) for k, v in saved_effort.items()} if isinstance(saved_effort, dict) else {}
+    lead_effort = {str(k): str(v) for k, v in saved_lead_effort.items()} if isinstance(saved_lead_effort, dict) else {}
     models.update(c.parse_agent_values(getattr(args, "model", None), "--model", "MODEL"))
+    lead_models.update(c.parse_agent_values(getattr(args, "lead_model", None), "--lead-model", "MODEL"))
     effort.update(c.parse_agent_values(getattr(args, "effort", None), "--effort", "LEVEL"))
+    lead_effort.update(c.parse_agent_values(getattr(args, "lead_effort", None), "--lead-effort", "LEVEL"))
     add_dirs = c.resolve_add_dirs(getattr(args, "add_dir", None))
 
     max_calls = int(settings.pick(getattr(args, "max_calls", None), "max_calls") or 0)
@@ -100,7 +109,9 @@ def build_team_config(args, goal: str, project_dir: Path, resume: bool, project_
         resume=resume,
         recheck=bool(getattr(args, "recheck", False)),
         models=models,
+        lead_models=lead_models,
         effort=effort,
+        lead_effort=lead_effort,
         max_calls=max_calls,
         max_minutes=max_minutes,
         stream_output=not getattr(args, "quiet", False),

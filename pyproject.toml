@@ -21,3 +21,6 @@ cliconnect = "omnicli.cli:main"
 
 [tool.setuptools.packages.find]
 include = ["omnicli*"]
+
+[tool.setuptools.package-data]
+"omnicli.commands" = ["office_assets/*"]

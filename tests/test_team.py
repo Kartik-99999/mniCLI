@@ -21,12 +21,18 @@ from omnicli.conductor import (
     Conductor,
     Task,
     TeamConfig,
+    build_final_prompt,
     build_plan_prompt,
+    build_review_prompt,
+    build_worker_prompt,
+    enforce_completion_gate,
     extract_summary,
     missing_dependency,
     normalize_tasks,
     paths_overlap,
+    protected_scope_conflicts,
     verify_passed,
+    uncommitted_paths,
 )
 
 FAKE = str(Path(__file__).with_name("fake_agent.py"))
@@ -92,23 +98,110 @@ class TestHelpers(unittest.TestCase):
             self.assertIn("jest", missing_dependency(127, "/bin/sh: line 1: jest: command not found", proj))
             self.assertEqual(missing_dependency(127, "/bin/sh: ./run.sh: not found", proj), "")
             self.assertEqual(missing_dependency(1, "AssertionError: 3 != 4", proj), "")
+            self.assertIn("sandbox", missing_dependency(
+                71, "sandbox-exec: sandbox_apply: Operation not permitted", proj))
         self.assertTrue(verify_passed(None))
         self.assertTrue(verify_passed((1, "x", "python module 'pytest' is not installed")))
         self.assertFalse(verify_passed((1, "AssertionError", "")))
 
     def test_final_prompt_carries_rerun_checks(self):
-        from omnicli.conductor import build_final_prompt
         tasks = [Task(id="t1", title="A", assignee="a", instructions="", verify="python3 -m unittest", status="done")]
         p = build_final_prompt("g", Path("."), tasks, ["a"], {"a": {"name": "A"}}, 1, False, 3,
                                [("python3 -m unittest", (0, "OK", "")), ("npm test", (1, "x\n1 failing", ""))])
         self.assertIn("`python3 -m unittest` -> PASS", p)
         self.assertIn("`npm test` -> FAIL (exit 1): x | 1 failing", p)
         self.assertIn("cannot run commands yourself", p)
+        self.assertIn("every capability and workflow", p)
+        self.assertIn("placeholder controls", p)
+        self.assertIn("report complete=false", p)
+
+    def test_plan_and_task_review_prompts_require_real_user_visible_behavior(self):
+        plan = build_plan_prompt("Build an editor", Path("."), {"a": {"name": "A"}}, ["a"], [], 3)
+        self.assertIn("concrete, user-visible behaviors", plan)
+        self.assertIn("toy demo", plan)
+        review = build_review_prompt(Task("t1", "Build editor", "a", "Implement editor", acceptance="edit and save"),
+                                     "Build an editor", "a", "Done", "diff", (0, "PASS", ""), 0, 1)
+        self.assertIn("passing tests are not enough", review)
+        self.assertIn("inert controls", review)
+        self.assertIn("user-visible behavior", review)
+
+    def test_completion_gate_rejects_unfinished_tasks_and_failed_checks(self):
+        task = Task("t1", "Build editor", "a", "Implement editor", status="failed")
+        result = enforce_completion_gate(
+            {"complete": True, "summary": "Looks done", "remaining_issues": []},
+            [task], [("npm test", (1, "1 failing", ""))])
+        self.assertFalse(result["complete"])
+        self.assertTrue(any("t1 (failed)" in issue for issue in result["remaining_issues"]))
+        self.assertTrue(any("npm test" in issue for issue in result["remaining_issues"]))
+
+    def test_completion_gate_allows_missing_environment_check_but_not_a_test_failure(self):
+        task = Task("t1", "Build editor", "a", "Implement editor", status="done")
+        result = enforce_completion_gate({"complete": True, "remaining_issues": []}, [task],
+                                         [("pytest", (127, "", "pytest is not installed"))])
+        self.assertTrue(result["complete"])
+        result = enforce_completion_gate({"complete": True, "remaining_issues": []}, [task],
+                                         [("npm test", (1, "failed", ""))])
+        self.assertFalse(result["complete"])
 
     def test_plan_prompt_lists_missing_tools(self):
         p = build_plan_prompt("g", Path("."), {"a": {"name": "A"}}, ["a"], ["python3"], 5, ["python3 -m pytest"])
         self.assertIn("NOT installed: python3 -m pytest", p)
         self.assertIn("unittest.TestCase", p)
+
+    def test_planning_protects_concurrent_changes_and_shows_agent_models(self):
+        p = build_plan_prompt("g", Path("."), {"claude": {"name": "Claude", "_model": "opus",
+                                                               "_effort": "high"}}, ["claude"], [], 3,
+                              protected_paths=["omnicli/commands/office.py"])
+        self.assertIn("CHANGED FILES OWNED BY THE USER OR OTHER ACTIVE AGENTS", p)
+        self.assertIn("omnicli/commands/office.py", p)
+        self.assertIn("worker model: opus", p)
+        self.assertIn("worker effort: high", p)
+        self.assertIn("visual quality as part of completion", p)
+        worker = build_worker_prompt(Task("t1", "edit models", "claude", "update model discovery"), "g",
+                                     Path("."), "Claude Code", "codex", [], model="opus", effort="high",
+                                     protected_paths=["omnicli/commands/office.py"])
+        self.assertIn("Runtime selection: model opus; reasoning effort high.", worker)
+        self.assertIn("PROTECTED FILES already being edited", worker)
+        self.assertIn("cohesive, finished screen", worker)
+        self.assertIn("omnicli/commands/office.py", worker)
+
+    def test_uncommitted_paths_include_untracked_work_but_skip_omnicli_state(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+            (root / "office part.py").write_text("working", encoding="utf-8")
+            (root / ".omnicli").mkdir()
+            (root / ".omnicli" / "state.json").write_text("{}", encoding="utf-8")
+            self.assertEqual(uncommitted_paths(root), ["office part.py"])
+
+    def test_protected_scope_conflicts_reject_overlapping_and_whole_project_tasks(self):
+        tasks = [Task("t1", "Office", "agy", "edit", owns=["src"]),
+                 Task("t2", "Docs", "muse", "document", owns=["docs/README.md"]),
+                 Task("t3", "Integration", "codex", "integrate", owns=[])]
+        conflicts = protected_scope_conflicts(tasks, ["src/office.tsx", "office/assets/logo.svg"])
+        self.assertEqual(len(conflicts), 2)
+        self.assertIn("t1 owns protected path(s): src/office.tsx", conflicts)
+        self.assertTrue(any("t3 has whole-project scope" in issue for issue in conflicts))
+
+    def test_changed_files_stages_only_task_owned_paths(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+            subprocess.run(["git", "config", "user.name", "Test"], cwd=root, check=True)
+            subprocess.run(["git", "config", "user.email", "test@example.invalid"], cwd=root, check=True)
+            (root / "owned").mkdir()
+            (root / "other").mkdir()
+            (root / "owned" / "task.txt").write_text("before", encoding="utf-8")
+            (root / "other" / "active.txt").write_text("before", encoding="utf-8")
+            subprocess.run(["git", "add", "-A"], cwd=root, check=True)
+            subprocess.run(["git", "commit", "-q", "-m", "baseline"], cwd=root, check=True)
+            (root / "owned" / "task.txt").write_text("task edit", encoding="utf-8")
+            (root / "other" / "active.txt").write_text("concurrent edit", encoding="utf-8")
+            conductor = Conductor(TeamConfig(goal="test", project_dir=root), specs={}, verbose=False)
+            self.assertEqual(conductor._changed_files(["owned"]), ["owned/task.txt"])
+            staged = subprocess.run(["git", "diff", "--cached", "--name-only"], cwd=root,
+                                    capture_output=True, text=True, check=True).stdout.splitlines()
+            self.assertEqual(staged, ["owned/task.txt"])
 
     def test_build_command_substitutes(self):
         spec = {"bin": sys.executable, "edit": ["-p", "{prompt}", "--cwd={dir}"]}
@@ -125,6 +218,8 @@ class TestHelpers(unittest.TestCase):
         edit = ag.BUILTIN_AGENTS["agy"]["edit"]
         settings = json.loads(edit[edit.index("--settings") + 1])
         self.assertIn("command(python3)", settings["permissions"]["allow"])
+        self.assertIn("command(vite)", settings["permissions"]["allow"])
+        self.assertIn("command(vitest)", settings["permissions"]["allow"])
         self.assertNotIn("command(rm)", settings["permissions"]["allow"])
 
     def test_builtin_adapters_never_bypass_permissions(self):
@@ -160,6 +255,71 @@ class TestConductorEndToEnd(unittest.TestCase):
         health = {n: {"installed": True, "ok": True, "reason": "ok"} for n in modes}
         cfg = TeamConfig(goal="build the fake project", project_dir=self.proj, lead=lead, auto_approve=True, **cfg_kw)
         return Conductor(cfg, specs=specs, health=health, verbose=False)
+
+    def test_plan_retries_when_scope_overlaps_active_untracked_work(self):
+        self.proj.mkdir(parents=True)
+        subprocess.run(["git", "init", "-q"], cwd=self.proj, check=True)
+        (self.proj / "office.tsx").write_text("Claude is editing this", encoding="utf-8")
+        c = self.make({"alpha": "good"}, lead="alpha")
+        c.workers = ["alpha"]
+        replies = [
+            {"project_name": "demo", "tasks": [{"id": "t1", "title": "Build", "assignee": "alpha",
+                                                    "owns": ["."]}]},
+            {"project_name": "demo", "tasks": [{"id": "t1", "title": "Build", "assignee": "alpha",
+                                                    "owns": ["src"]}]},
+        ]
+        prompts = []
+
+        def reply(_kind, prompt, _key, **_kwargs):
+            prompts.append(prompt)
+            return replies.pop(0)
+
+        with mock.patch("omnicli.conductor.tool_report", return_value=([], [])), \
+                mock.patch("omnicli.conductor.ledger.skill_recommendations", return_value={}), \
+                mock.patch.object(c, "ask_lead", side_effect=reply):
+            self.assertTrue(c.plan())
+        self.assertEqual(len(prompts), 2)
+        self.assertIn("office.tsx", prompts[0])
+        self.assertIn("PLAN REJECTED FOR FILE OWNERSHIP CONFLICTS", prompts[1])
+        self.assertEqual(c.tasks[0].owns, ["src"])
+        self.assertEqual(c.protected_paths, ["office.tsx"])
+
+    def test_protected_changes_stay_in_main_checkout_during_worktree_checkpoint(self):
+        self.proj.mkdir(parents=True)
+        subprocess.run(["git", "init", "-q"], cwd=self.proj, check=True)
+        subprocess.run(["git", "config", "user.name", "Test"], cwd=self.proj, check=True)
+        subprocess.run(["git", "config", "user.email", "test@example.invalid"], cwd=self.proj, check=True)
+        (self.proj / "src").mkdir()
+        (self.proj / "src" / "app.txt").write_text("base", encoding="utf-8")
+        (self.proj / "office.tsx").write_text("base office", encoding="utf-8")
+        subprocess.run(["git", "add", "-A"], cwd=self.proj, check=True)
+        subprocess.run(["git", "commit", "-q", "-m", "initial"], cwd=self.proj, check=True)
+        (self.proj / "office.tsx").write_text("Claude's active edit", encoding="utf-8")
+        (self.proj / "office-extra.js").write_text("untracked active edit", encoding="utf-8")
+
+        c = self.make({"alpha": "good"}, lead="alpha", use_worktrees=True)
+        c.protected_paths = uncommitted_paths(self.proj)
+        c.setup_git()
+        self.assertTrue(c.git)
+        self.assertEqual((self.proj / "office.tsx").read_text(encoding="utf-8"), "Claude's active edit")
+        self.assertEqual(subprocess.run(["git", "diff", "--cached", "--name-only"], cwd=self.proj,
+                                        capture_output=True, text=True, check=True).stdout, "")
+
+        task = Task("t1", "Build app", "alpha", "edit app", owns=["src"])
+        workspace = c._task_workspace(task)
+        self.assertNotEqual(workspace, self.proj)
+        (workspace / "src" / "app.txt").write_text("worker edit", encoding="utf-8")
+        task.agent_used = "alpha"
+        task.commit = c._checkpoint_workspace(task, workspace, ["src"])
+        c._remove_task_workspace(task)
+
+        self.assertTrue(task.commit)
+        self.assertEqual((self.proj / "src" / "app.txt").read_text(encoding="utf-8"), "worker edit")
+        self.assertEqual((self.proj / "office.tsx").read_text(encoding="utf-8"), "Claude's active edit")
+        self.assertEqual((self.proj / "office-extra.js").read_text(encoding="utf-8"), "untracked active edit")
+        committed = subprocess.run(["git", "show", "--name-only", "--format=", "HEAD"], cwd=self.proj,
+                                   capture_output=True, text=True, check=True).stdout.splitlines()
+        self.assertEqual(committed, ["src/app.txt"])
 
     def test_plan_editor_updates_task_fields(self):
         c = self.make({"alpha": "good", "beta": "good"}, lead="alpha")
@@ -282,6 +442,24 @@ class TestConductorEndToEnd(unittest.TestCase):
         self.assertEqual(len(first.attempts), 2)
         self.assertEqual(first.attempts[0]["result"], "revise")
         self.assertIn("revised", (self.proj / "a/a.txt").read_text())
+
+    def test_last_review_revision_does_not_count_as_complete_when_verify_passes(self):
+        c = self.make({"alpha": "good"}, lead="alpha", jobs=1, retries=0)
+        original_ask_lead = c.ask_lead
+
+        def revise_task_review(kind, prompt, expected_key=None, **kwargs):
+            if kind == "review":
+                return {"verdict": "revise", "feedback": "Finish the missing user workflow.",
+                        "summary": "The workflow is still missing."}
+            return original_ask_lead(kind, prompt, expected_key, **kwargs)
+
+        with mock.patch.object(c, "ask_lead", side_effect=revise_task_review):
+            rc = c.run()
+        self.assertEqual(rc, 2)
+        self.assertTrue(any(task.status == "failed" for task in c.tasks))
+        self.assertFalse(c.final["complete"])
+        self.assertTrue(any("Tasks did not finish successfully" in issue
+                            for issue in c.final["remaining_issues"]))
 
     def test_followup_round(self):
         c = self.make({"alpha": "followup", "beta": "good"}, lead="alpha", jobs=1, max_rounds=2)

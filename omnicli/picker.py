@@ -26,10 +26,10 @@ def choose_one(title: str, options: Sequence[Option], current: Optional[str] = N
     `validate(value)` may return an error message to reject a typed custom value."""
     out(c_bold(title))
     for i, (value, label) in enumerate(options, 1):
-        mark = c_green("  ← current") if current is not None and value == current else ""
+        mark = c_green("  ✓ current") if current is not None and value == current else ""
         out(f"  {c_cyan(str(i).rjust(2))}) {c_bold(value)}  {c_dim(label)}{mark}")
     keep = f"Enter = keep {current}" if current else "Enter = keep default"
-    hint = f"Number{', ' + custom_hint if allow_custom else ''} ({keep}, q = cancel): "
+    hint = f"Type a number{', ' + custom_hint if allow_custom else ''} ({keep}; q = cancel): "
     for _ in range(3):
         ans = _ask(input_fn, hint)
         if ans is None or ans.lower() in ("q", "quit", "cancel"):

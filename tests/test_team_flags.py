@@ -18,7 +18,7 @@ from unittest import mock
 # Never let tests touch the real ~/.omnicli (ledger, run registry, health cache, config).
 os.environ["OMNICLI_HOME"] = tempfile.mkdtemp(prefix="omnicli-test-home-")
 
-from omnicli import agents as ag  # noqa: E402
+from omnicli import agents as ag, model_catalog  # noqa: E402
 from omnicli import cli, conductor, runs, settings  # noqa: E402
 from omnicli.conductor import Conductor, TeamConfig, parse_agent_values, resolve_add_dirs  # noqa: E402
 
@@ -98,7 +98,9 @@ class TestBuildCommandOptions(unittest.TestCase):
 
     def test_codex_options_go_before_the_positional_prompt(self):
         s = self.spec("codex", _model="gpt-5", _effort="high", _add_dirs=["/data"])
-        cmd = ag.build_command(s, "edit", "PROMPT", "/p")
+        # A model-specific effort must be confirmed by the recent Codex catalog.
+        with mock.patch.object(model_catalog, "cached_effort_levels", return_value=["low", "high"]):
+            cmd = ag.build_command(s, "edit", "PROMPT", "/p")
         self.assertEqual(cmd[-1], "PROMPT")
         self.assertIn("-m", cmd)
         self.assertEqual(cmd[cmd.index("-m") + 1], "gpt-5")
@@ -107,8 +109,16 @@ class TestBuildCommandOptions(unittest.TestCase):
         self.assertLess(cmd.index("-C"), cmd.index("-m"))  # still after `exec ... -C /p`
 
     def test_agy_and_muse(self):
-        agy = ag.build_command(self.spec("agy", _model="m1", _effort="max", _add_dirs=["/x"]), "edit", "P", "/p")
-        self.assertEqual(agy[-6:], ["--model", "m1", "--effort", "max", "--add-dir", "/x"])
+        self.assertEqual(ag.BUILTIN_AGENTS["agy"]["effort_levels"], ["low", "medium", "high"])
+        agy = ag.build_command(self.spec("agy", _model="m1", _effort="high", _add_dirs=["/x"]), "edit", "P", "/p")
+        self.assertEqual(agy[-6:], ["--model", "m1", "--effort", "high", "--add-dir", "/x"])
+        for unsupported in ("xhigh", "max"):
+            stale = self.spec("agy", _model="m1", _effort=unsupported, _add_dirs=["/x"])
+            self.assertNotIn("--effort", ag.build_command(stale, "edit", "P", "/p"))
+            self.assertNotIn("--effort", ag.build_command(stale, "edit", "P", "/p", effort=unsupported))
+        fixed_tier = ag.with_options(self.spec("agy"), model="gemini-3.8-flash-high", effort="max")
+        self.assertNotIn("_effort", fixed_tier)
+        self.assertEqual(ag.effort_levels(self.spec("agy"), "gemini-3.8-flash-high"), ["high"])
         muse = ag.build_command(self.spec("muse", _model="m2", _effort="low", _add_dirs=["/x"]), "edit", "P", "/p")
         self.assertEqual(muse[-5:], ["--model", "m2", "--reasoning-effort", "low", "P"])
         self.assertNotIn("--add-dir", muse)  # muse exec has no --add-dir equivalent
@@ -195,6 +205,32 @@ class TestConductorAgentOptions(HomeIsolated):
             c.select_team()
         self.assertEqual(out.getvalue().count("has no supported way"), 1)
         self.assertIn("beta cannot be given extra directories", out.getvalue())
+
+    def test_same_cli_uses_separate_worker_and_lead_models(self):
+        c = self.make({"alpha": "recorder"}, extra_spec=OPTION_ARGS,
+                      models={"alpha": "worker-model"}, lead_models={"alpha": "lead-model"},
+                      effort={"alpha": "high"}, lead_effort={"alpha": "low"})
+        self.assertEqual(c.run(), 0)
+        calls = [json.loads(l) for l in (self.tmp / "fake" / "argv.jsonl").read_text().splitlines()]
+        for call in calls:
+            model = call["args"][call["args"].index("--fake-model") + 1]
+            if call["kind"] == "task assignment":
+                self.assertEqual(model, "worker-model")
+                self.assertIn("--fake-effort=high", call["args"])
+            else:
+                self.assertEqual(model, "lead-model")
+                self.assertIn("--fake-effort=low", call["args"])
+
+    def test_changed_lead_model_does_not_inherit_worker_effort(self):
+        c = self.make({"alpha": "recorder"}, extra_spec=OPTION_ARGS,
+                      models={"alpha": "worker-model"}, lead_models={"alpha": "lead-model"},
+                      effort={"alpha": "high"})
+        self.assertEqual(c.run(), 0)
+        calls = [json.loads(l) for l in (self.tmp / "fake" / "argv.jsonl").read_text().splitlines()]
+        worker = next(call for call in calls if call["kind"] == "task assignment")
+        lead = next(call for call in calls if call["kind"] == "planning")
+        self.assertIn("--fake-effort=high", worker["args"])
+        self.assertNotIn("--fake-effort=high", lead["args"])
 
     def test_model_effort_and_add_dir_reach_the_agent_process(self):
         extra = self.tmp / "shared"
@@ -290,15 +326,30 @@ class TestBudgets(HomeIsolated):
 class TestCliFlags(HomeIsolated):
     def test_models_merge_over_settings_and_cli_wins(self):
         settings.set_value("models.claude", "opus")
+        settings.set_value("lead_models.claude", "sonnet")
         settings.set_value("models.codex", "gpt-5")
         settings.set_value("effort.agy", "high")
         captured = []
         rc, _ = self.cli(["team", "g", "-d", str(self.proj), "--plan-only", "--model", "claude=sonnet",
-                          "--model", "muse=m", "--effort", "claude=max"], captured=captured)
+                          "--model", "muse=m", "--lead-model", "claude=opus", "--effort", "claude=max"], captured=captured)
         self.assertEqual(rc, 0)
         cfg = captured[0]
         self.assertEqual(cfg.models, {"claude": "sonnet", "codex": "gpt-5", "muse": "m"})
+        self.assertEqual(cfg.lead_models, {"claude": "opus"})
         self.assertEqual(cfg.effort, {"agy": "high", "claude": "max"})
+        self.assertEqual(cfg.lead_effort, {})
+        captured = []
+        rc, _ = self.cli(["team", "g", "-d", str(self.proj), "--plan-only"], captured=captured)
+        self.assertEqual(rc, 0)
+        self.assertEqual(captured[0].lead_models, {"claude": "sonnet"})
+
+    def test_lead_effort_flag_overrides_saved_lead_effort(self):
+        settings.set_value("lead_effort.codex", "high")
+        captured = []
+        rc, _ = self.cli(["team", "g", "-d", str(self.proj), "--plan-only",
+                          "--lead-effort", "codex=xhigh"], captured=captured)
+        self.assertEqual(rc, 0)
+        self.assertEqual(captured[0].lead_effort, {"codex": "xhigh"})
 
     def test_bad_agent_value_is_a_friendly_error(self):
         captured = []
@@ -309,6 +360,12 @@ class TestCliFlags(HomeIsolated):
         rc, out = self.cli(["team", "g", "-d", str(self.proj), "--effort", "claude="])
         self.assertEqual(rc, 1)
         self.assertIn("--effort expects AGENT=LEVEL", out)
+        rc, out = self.cli(["team", "g", "-d", str(self.proj), "--lead-effort", "codex="])
+        self.assertEqual(rc, 1)
+        self.assertIn("--lead-effort expects AGENT=LEVEL", out)
+        rc, out = self.cli(["team", "g", "-d", str(self.proj), "--lead-model", "opus"])
+        self.assertEqual(rc, 1)
+        self.assertIn("--lead-model expects AGENT=MODEL", out)
 
     def test_add_dir_refuses_home_and_resolves_paths(self):
         rc, out = self.cli(["team", "g", "-d", str(self.proj), "--add-dir", "~"])

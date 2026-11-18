@@ -7,6 +7,7 @@ command-line flags always win.
     omnicli config set lead claude
     omnicli config set jobs 3
     omnicli config set models.claude opus
+    omnicli config set lead_models.claude sonnet
 """
 
 import json
@@ -30,12 +31,18 @@ SCHEMA: Dict[str, tuple] = {
     "max_calls": (int, 0, "stop a run after this many AI calls (0 = no limit)"),
     "max_minutes": (float, 0.0, "stop a run after this many minutes (0 = no limit)"),
     "models": (dict, {}, "per-agent model, e.g. models.claude=opus"),
+    "lead_models": (dict, {}, "per-agent lead model, e.g. lead_models.claude=opus (overrides models.<agent> for lead calls)"),
     "effort": (dict, {}, "per-agent reasoning effort, e.g. effort.agy=high"),
+    "lead_effort": (dict, {}, "per-agent lead reasoning effort, e.g. lead_effort.codex=xhigh"),
     "verify_policy": (str, "strict", "strict = only plain test commands may run as checks; trust = run any (unsafe)"),
     "verify_sandbox": (bool, True, "macOS: run checks with no network and no writes outside the project"),
     "env_passthrough": (list, None, "extra environment variables AI tools may see, e.g. AWS_PROFILE,MY_TOKEN"),
     "memory_scope": (str, "project", "project = lessons stay in their project; global = shared across projects"),
+    "office": (str, "on", "chat starts the live office: on = print its link, open = also open the browser, off = don't start it"),
 }
+
+# string settings with a fixed set of values
+CHOICES: Dict[str, tuple] = {"office": ("on", "open", "off")}
 
 _TRUE = {"1", "true", "yes", "on", "y"}
 _FALSE = {"0", "false", "no", "off", "n"}
@@ -107,7 +114,9 @@ def coerce(key: str, raw: Any) -> Any:
             raise SettingsError(f"'{top}' must be a number")
     if typ is list:
         return [x.strip() for x in s.split(",") if x.strip()]
-    return s
+    if top in CHOICES and s.lower() not in CHOICES[top]:
+        raise SettingsError(f"'{top}' must be one of: {', '.join(CHOICES[top])}")
+    return s.lower() if top in CHOICES else s
 
 
 def _write(data: Dict[str, Any]) -> None:

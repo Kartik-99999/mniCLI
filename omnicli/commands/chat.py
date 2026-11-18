@@ -102,7 +102,7 @@ def find_image_paths(line: str) -> List[Tuple[int, int, str]]:
 
 
 LOCAL_COMMANDS = {"help", "exit", "quit", "clear", "project", "new", "build", "lead", "workers", "model",
-                  "effort", "team", "setup"}
+                  "lead-model", "effort", "lead-effort", "team", "setup", "office"}
 
 
 def suggest(word: str, choices) -> "Optional[str]":
@@ -112,6 +112,298 @@ def suggest(word: str, choices) -> "Optional[str]":
     return hits[0] if hits else None
 
 
+def slash_command_matches(line: str, commands=None) -> List[str]:
+    """Slash commands available for readline completion at the start of a chat line."""
+    if not line.startswith("/") or any(ch.isspace() for ch in line):
+        return []
+    choices = commands if commands is not None else (LOCAL_COMMANDS | PASSTHROUGH)
+    prefix = line.lower()
+    priority = {name: index for index, name in enumerate(SLASH_COMMAND_ORDER)}
+    ordered = sorted(choices, key=lambda name: (priority.get(name, len(priority)), name))
+    return ["/" + name for name in ordered if ("/" + name).startswith(prefix)]
+
+
+def _readline_command_completer(text: str, state: int):
+    if state == 0:
+        try:
+            import readline
+            line = readline.get_line_buffer()
+        except Exception:
+            return None
+        matches = slash_command_matches(line)
+        if text:
+            matches = [value for value in matches if value.lower().startswith(text.lower())]
+        _readline_command_completer.matches = matches
+    matches = getattr(_readline_command_completer, "matches", [])
+    return matches[state] if state < len(matches) else None
+
+
+SLASH_DESCRIPTIONS = {
+    "agents": "show available AI coding CLIs",
+    "build": "start a team build directly",
+    "clear": "clear the chat conversation",
+    "config": "view or change OmniCLI settings",
+    "continue": "continue the latest unfinished run",
+    "doctor": "check OmniCLI and agent setup",
+    "effort": "choose an AI's reasoning effort",
+    "exit": "leave chat",
+    "export": "export a run report",
+    "help": "show chat commands",
+    "lead": "choose the AI that plans and reviews",
+    "lead-effort": "choose the lead model's reasoning effort",
+    "lead-model": "choose the model used for lead calls",
+    "logs": "view agent prompts and output",
+    "model": "choose the model used for worker tasks",
+    "models": "list models each CLI supports",
+    "new": "switch to a new project folder",
+    "office": "open the animated live team view",
+    "project": "show or switch the project folder",
+    "resume": "resume a saved team run",
+    "review": "ask an AI to review the project",
+    "rewind": "undo a task checkpoint",
+    "runs": "list saved team runs",
+    "setup": "configure the team and defaults",
+    "status": "show live team progress",
+    "team": "view, build, or restore a custom team",
+    "undo": "undo a task checkpoint",
+    "usage": "show agent usage and time",
+    "workers": "choose which AIs build tasks",
+}
+SLASH_COMMAND_ORDER = ["model", "team", "status", "office", "workers", "lead", "lead-model", "lead-effort", "effort",
+                      "build", "help", "models", "setup"]
+
+
+def choose_slash_completion(line: str, matches: List[str], selected: int) -> Optional[str]:
+    """Return the completion to insert, or None when Enter should run an exact command."""
+    if not matches:
+        return None
+    candidate = matches[selected % len(matches)]
+    if candidate.lower() == line.lower():
+        return None
+    return candidate + " "
+
+
+def _menu_rows(matches: List[str], selected: int, width: int, height: int) -> List[str]:
+    """Compact command dropdown with a highlighted row and keyboard hints."""
+    if not matches:
+        return []
+    option_rows = max(1, min(8, height - 5))
+    start = min(max(0, selected - option_rows + 1), max(0, len(matches) - option_rows))
+    shown = matches[start:start + option_rows]
+    content_width = max(20, width - 2)
+    rows = ["  Slash commands"]
+    for offset, command in enumerate(shown):
+        index = start + offset
+        marker = "›" if index == selected else " "
+        label = command.ljust(16)
+        description = SLASH_DESCRIPTIONS.get(command[1:], "run this OmniCLI command")
+        row = f" {marker} {label} {description}"[:content_width]
+        if index == selected and not os.environ.get("NO_COLOR"):
+            row = "\033[44m\033[97m" + row.ljust(content_width) + "\033[0m"
+        rows.append(row)
+    if len(matches) > len(shown):
+        rows.append(f"  {start + 1}-{start + len(shown)} of {len(matches)} commands")
+    rows.append("  ↑/↓ choose · Enter select · Esc close")
+    return rows
+
+
+def _cell_width(char: str) -> int:
+    import unicodedata
+    if unicodedata.combining(char):
+        return 0
+    return 2 if unicodedata.east_asian_width(char) in ("W", "F") else 1
+
+
+def _input_view(line: str, cursor: int, width: int) -> Tuple[str, int]:
+    """Horizontal viewport for the single-row input; return visible text and caret column."""
+    prefix = [0]
+    for char in line:
+        prefix.append(prefix[-1] + _cell_width(char))
+    cursor_width = prefix[cursor]
+    left_target = max(0, cursor_width - width + 1)
+    left = 0
+    while left < cursor and prefix[left + 1] <= left_target:
+        left += 1
+    right = left
+    while right < len(line) and prefix[right + 1] - prefix[left] <= width:
+        right += 1
+    return line[left:right], cursor_width - prefix[left]
+
+
+def read_chat_line(prompt: str) -> str:
+    """Read a chat line with an inline, arrow-selectable slash-command menu on TTYs."""
+    if not sys.stdin.isatty() or not sys.stdout.isatty():
+        return input(prompt)
+    try:
+        import readline
+        import shutil
+        import termios
+        import tty
+        import codecs
+    except Exception:
+        return input(prompt)
+
+    fd = sys.stdin.fileno()
+    try:
+        original = termios.tcgetattr(fd)
+    except Exception:
+        return input(prompt)
+    prompt_width = len(re.sub(r"\x1b\[[0-9;]*m", "", prompt))
+    line, cursor = "", 0
+    selected, last_matches, menu_hidden = 0, [], False
+    history_index, saved_line = None, ""
+    width, height = shutil.get_terminal_size((100, 24))
+    decoder = codecs.getincrementaldecoder("utf-8")()
+
+    def read_char():
+        while True:
+            raw = os.read(fd, 1)
+            if not raw:
+                return ""
+            char = decoder.decode(raw)
+            if char:
+                return char
+
+    def matches_now():
+        return [] if menu_hidden else slash_command_matches(line)
+
+    def render():
+        nonlocal selected, last_matches
+        matches = matches_now()
+        if matches != last_matches:
+            selected = 0
+        last_matches = matches
+        available = max(1, width - prompt_width - 1)
+        visible, caret = _input_view(line, cursor, available)
+        rows = _menu_rows(matches, selected, width, height)
+        # The cursor is always on the single-row input line. Clear the old menu below it,
+        # draw the current contents, then put the cursor back at the editing position.
+        sys.stdout.write("\r\033[J" + prompt + visible)
+        for row in rows:
+            sys.stdout.write("\r\n" + row)
+        if rows:
+            sys.stdout.write("\033[{}A".format(len(rows)))
+        sys.stdout.write("\r")
+        if prompt_width + caret:
+            sys.stdout.write("\033[{}C".format(prompt_width + caret))
+        sys.stdout.flush()
+
+    def clear_and_finish(text: str):
+        sys.stdout.write("\r\033[J" + prompt + text + "\r\n")
+        sys.stdout.flush()
+
+    def read_escape():
+        import select
+        if not select.select([fd], [], [], 0.08)[0]:
+            return "ESC"
+        first = os.read(fd, 1).decode("ascii", "ignore")
+        if first != "[":
+            return "ESC"
+        sequence = ""
+        while len(sequence) < 4:
+            if not select.select([fd], [], [], 0.08)[0]:
+                break
+            char = os.read(fd, 1).decode("ascii", "ignore")
+            sequence += char
+            if char.isalpha() or char == "~":
+                break
+        return "[" + sequence
+
+    try:
+        tty.setraw(fd)
+        render()
+        while True:
+            char = read_char()
+            if char in ("\r", "\n"):
+                matches = matches_now()
+                completion = choose_slash_completion(line, matches, selected)
+                if completion is not None:
+                    line = completion
+                    cursor = len(line)
+                    menu_hidden = False
+                    render()
+                    continue
+                clear_and_finish(line)
+                if line:
+                    readline.add_history(line)
+                return line
+            if char == "\x03":
+                clear_and_finish("")
+                raise KeyboardInterrupt
+            if char == "\x04":
+                if not line:
+                    clear_and_finish("")
+                    raise EOFError
+                if cursor < len(line):
+                    line = line[:cursor] + line[cursor + 1:]
+            elif char == "\x1b":
+                key = read_escape()
+                matches = matches_now()
+                if key == "ESC":
+                    menu_hidden = bool(matches)
+                elif key == "[A":
+                    if matches:
+                        selected = (selected - 1) % len(matches)
+                    else:
+                        history_index = max(1, (history_index or readline.get_current_history_length() + 1) - 1)
+                        saved_line = line if history_index == readline.get_current_history_length() else saved_line
+                        line = readline.get_history_item(history_index) or ""
+                        cursor = len(line)
+                elif key == "[B":
+                    if matches:
+                        selected = (selected + 1) % len(matches)
+                    elif history_index is not None:
+                        history_index += 1
+                        if history_index > readline.get_current_history_length():
+                            history_index, line = None, saved_line
+                        else:
+                            line = readline.get_history_item(history_index) or ""
+                        cursor = len(line)
+                elif key == "[C":
+                    cursor = min(len(line), cursor + 1)
+                elif key == "[D":
+                    cursor = max(0, cursor - 1)
+                elif key in ("[H", "[1~"):
+                    cursor = 0
+                elif key in ("[F", "[4~"):
+                    cursor = len(line)
+                elif key == "[3~" and cursor < len(line):
+                    line = line[:cursor] + line[cursor + 1:]
+                menu_hidden = False if key != "ESC" else menu_hidden
+            elif char == "\t":
+                matches = matches_now()
+                if matches:
+                    line = matches[selected] + " "
+                    cursor = len(line)
+                    menu_hidden = False
+            elif char in ("\x7f", "\x08"):
+                if cursor:
+                    line = line[:cursor - 1] + line[cursor:]
+                    cursor -= 1
+                menu_hidden = False
+            elif char == "\x01":  # Ctrl-A
+                cursor = 0
+            elif char == "\x05":  # Ctrl-E
+                cursor = len(line)
+            elif char == "\x15":  # Ctrl-U
+                line, cursor = "", 0
+                menu_hidden = False
+            elif char == "\x17":  # Ctrl-W
+                left = line[:cursor].rstrip()
+                cut = len(left.rsplit(" ", 1)[0]) if " " in left else 0
+                line = line[:cut] + line[cursor:]
+                cursor = cut
+                menu_hidden = False
+            elif char.isprintable():
+                line = line[:cursor] + char + line[cursor:]
+                cursor += len(char)
+                history_index = None
+                menu_hidden = False
+            render()
+    finally:
+        termios.tcsetattr(fd, termios.TCSADRAIN, original)
+
+
 HELP = """\
 Talk in plain English - the lead AI answers, and asks before the team builds anything.
   build a todo app with FastAPI and SQLite      why did t2 fail?      add tests for the API
@@ -119,14 +411,19 @@ Talk in plain English - the lead AI answers, and asks before the team builds any
 /build <goal>        start the team now (no AI call to decide)
 /status  /runs  /logs [task]  /usage  /export  /undo <task>  /continue  /review  /doctor  /agents  /config
 /project [dir]       show or switch the project folder (/new <dir> for a folder that doesn't exist yet)
-/team                show who leads, who works, and each AI's model/effort
+/team                show the active team; /team custom builds a lineup
+/team save|use|list  save, restore, or list named team lineups and per-CLI models
 /lead [agent]        choose the lead AI (plans, reviews, and is who you talk to here)
 /workers             choose which AIs work on tasks
-/model [agent]       choose an AI's model from its own list     /effort [agent]  its reasoning effort
+/model [agent]       set worker model       /lead-model [agent] set lead model separately
+/effort [agent]      set worker reasoning effort
+/lead-effort [agent] set lead reasoning effort separately
+/office [run|path]   open the live team office in your browser (chat starts it for you)
 /models              list every AI's available models           /setup           guided setup of all of it
 /clear               forget the conversation so far
 !<command>           run a shell command in the project folder, e.g. !ls  !git log --oneline
-/exit                quit (or Ctrl-D)"""
+/exit                quit (or Ctrl-D)
+Type / to open the command menu; use ↑/↓ to choose and Enter to select."""
 
 
 # --------------------------------------------------------------------------- pure helpers
@@ -304,7 +601,8 @@ class ChatSession:
                  input_fn: Callable[[str], str] = input, out: Callable[[str], None] = print,
                  specs: Optional[Dict] = None, health: Optional[Dict] = None,
                  run_cli: Optional[Callable[[List[str]], int]] = None,
-                 make_conductor: Optional[Callable] = None, interactive: Optional[bool] = None):
+                 make_conductor: Optional[Callable] = None, interactive: Optional[bool] = None,
+                 office_mode: str = "off"):
         from omnicli import agents as ag
         self.ag = ag
         self.project = Path(project).expanduser().resolve() if project is not None else None
@@ -318,6 +616,9 @@ class ChatSession:
         self.history: List[Tuple[str, str]] = []
         self.attachments: Dict[int, str] = {}   # [Image #N] -> stored copy of the image
         self.last_answerer: Optional[str] = None
+        self._office_servers = []
+        self.office_mode = office_mode   # "on" = start the live office + show its link, "open" = also open it
+        self.office_url: Optional[str] = None
         self.requested_lead = lead
         self.lead: Optional[str] = None
         self.ready: List[str] = []
@@ -387,7 +688,7 @@ class ChatSession:
         for name in candidates:
             if name in self.down:
                 continue
-            spec = self.ag.with_saved_options(self.specs[name], name)
+            spec = self.ag.with_saved_lead_options(self.specs[name], name)
             if images:
                 spec["_images"] = images
             stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S-%f")
@@ -617,10 +918,12 @@ class ChatSession:
                 self.out(f"{BADGE_WARN} Usage: /new <folder>")
             else:
                 self.set_project(" ".join(args), must_exist=False)
-        elif cmd in ("lead", "workers", "model", "effort", "team", "setup"):
+        elif cmd in ("lead", "workers", "model", "lead-model", "effort", "lead-effort", "team", "setup"):
             self.team_command(cmd, args)
         elif cmd == "build":
             self.start_build(" ".join(args), images=getattr(self, "_current_images", []))
+        elif cmd == "office":
+            self.open_office(args)
         elif cmd in PASSTHROUGH:
             argv = [cmd] + args
             if self.project is not None and cmd in DIR_COMMANDS and not ({"-d", "--dir", "--run"} & set(args)):
@@ -634,6 +937,85 @@ class ChatSession:
                 self.out(f"{BADGE_WARN} Unknown command /{cmd}. Type /help.")
         return True
 
+    def start_live_office(self) -> None:
+        """Start the chat's own office server. It follows self.project, so whatever project the chat
+        works on (including a run it starts later) shows up live; before any run it shows the team at rest."""
+        from omnicli.commands import office
+        try:
+            server, url = office.start_preferred(lambda: self.project, fallback=self._office_idle)
+        except OSError as ex:
+            self.out(f"{BADGE_WARN} The live office could not start ({ex}); chat works as usual.")
+            return
+        self._office_servers.append(server)
+        self.office_url = url
+        if self.office_mode == "open":
+            self._open_in_browser(url)
+
+    def _office_idle(self, project):
+        from omnicli.commands import office
+        wanted = settings.get("workers") or []
+        workers = [w for w in wanted if w in self.ready] or list(self.ready)
+        return office.idle_snapshot(project, self.lead, [w for w in workers if w != self.lead])
+
+    @staticmethod
+    def _open_in_browser(url: str) -> bool:
+        import webbrowser
+        try:
+            return bool(webbrowser.open(url))
+        except (webbrowser.Error, OSError):
+            return False
+
+    def stop_live_office(self) -> None:
+        for server in self._office_servers:
+            try:
+                server.shutdown()
+                server.server_close()
+            except Exception:
+                pass
+        self._office_servers = []
+        self.office_url = None
+
+    def open_office(self, args: List[str]) -> None:
+        from omnicli.commands import office
+
+        if not args and self.office_url:
+            # the chat's own office already follows this project: just show it
+            if self._open_in_browser(self.office_url):
+                self.out(f"{BADGE_INFO} Live office opened: {self.office_url}  (chat remains available here)")
+            else:
+                self.out(f"{BADGE_INFO} Live office: {self.office_url}  - open that link in your browser.")
+            return
+        if len(args) > 1:
+            self.out(f"{BADGE_WARN} Usage: /office [run number, project path, or name]")
+            return
+        ref, dir_opt = (args[0], None) if args else (None, None)
+        if ref:
+            candidate = Path(ref).expanduser()
+            if candidate.is_dir():
+                ref, dir_opt = None, str(candidate)
+        elif self.project is not None:
+            dir_opt = str(self.project)
+        project_dir, problem = office.status.resolve_run(ref, dir_opt, cwd=str(self.project or Path.cwd()))
+        if project_dir is None:
+            self.out(f"{BADGE_WARN} {problem}")
+            return
+        try:
+            server, url = office.start_background(project_dir)
+        except OSError as ex:
+            self.out(f"{BADGE_WARN} Could not open the office view: {ex}")
+            return
+        self._office_servers.append(server)
+        import webbrowser
+        try:
+            opened = webbrowser.open(url)
+        except (webbrowser.Error, OSError):
+            opened = False
+        if opened:
+            self.out(f"{BADGE_INFO} Live office opened: {url}  (chat remains available here)")
+        else:
+            self.out(f"{BADGE_INFO} Live office is running at {url}; open that link in your browser.  "
+                     "(chat remains available here)")
+
     # ---------------------------------------------------------- team choices
     def team_command(self, cmd: str, args: List[str]) -> None:
         from omnicli.commands import models_cmd as mc
@@ -642,6 +1024,48 @@ class ChatSession:
             self.select_lead()
         ready = self.ready
         if cmd == "team":
+            if args:
+                action = args[0].lower()
+                if action in ("custom", "configure") and len(args) == 1:
+                    mc.run_custom_team(self.specs, ready, self._health or {},
+                                       input_fn=self.input_fn, out=self.out)
+                    self.requested_lead = None
+                    self.select_lead()
+                    return
+                if action == "save" and len(args) == 2:
+                    from omnicli import profiles
+                    try:
+                        profiles.save(args[1])
+                    except profiles.ProfileError as ex:
+                        self.out(f"{BADGE_WARN} Could not save team: {ex}")
+                        return
+                    self.out(f"{BADGE_INFO} Saved team '{args[1]}' with its lead, workers, and per-CLI models.")
+                    return
+                if action == "use" and len(args) == 2:
+                    from omnicli import profiles
+                    try:
+                        profiles.apply(args[1])
+                    except profiles.ProfileError as ex:
+                        self.out(f"{BADGE_WARN} Could not load team: {ex}")
+                        return
+                    self.requested_lead = None
+                    self.select_lead()
+                    self.out(f"{BADGE_INFO} Loaded team '{args[1]}'.")
+                    return
+                if action == "list" and len(args) == 1:
+                    from omnicli import profiles
+                    try:
+                        names = sorted(profiles.load_all())
+                    except profiles.ProfileError as ex:
+                        self.out(f"{BADGE_WARN} Could not list teams: {ex}")
+                        return
+                    if not names:
+                        self.out(c_dim("No saved teams yet. Use /team save <name>."))
+                    else:
+                        self.out("Saved teams: " + ", ".join(names))
+                    return
+                self.out(f"{BADGE_WARN} Usage: /team [custom | save <name> | use <name> | list]")
+                return
             for line in mc.describe_team(self.specs, ready, self._health or {}):
                 self.out("  " + line)
             self.out(c_dim(f"  You're talking to {self.lead or '(no AI ready)'} in this chat."))
@@ -670,15 +1094,18 @@ class ChatSession:
         if cmd == "workers":
             mc.pick_workers(self.specs, ready, self.input_fn, self.out)
             return
-        # model / effort: which agent?
+        # model / lead-model / effort: which agent?
         name = args[0] if args else None
         if name is None:
-            key = "model_args" if cmd == "model" else "effort_args"
+            key = "model_args" if cmd in ("model", "lead-model") else "effort_args"
             candidates = [(n, self.specs[n].get("name", n)) for n in ready if self.specs[n].get(key)]
             if not candidates:
                 self.out(f"{BADGE_WARN} No ready AI supports choosing a {cmd}.")
                 return
-            name = choose_one(f"Choose the {cmd} for which AI?", candidates, current=self.lead,
+            role = "lead" if cmd in ("lead-model", "lead-effort") else "worker"
+            name = choose_one(f"Which AI's {role} model do you want to change?" if cmd in ("model", "lead-model")
+                              else f"Which AI's {role} effort do you want to change?" if cmd in ("effort", "lead-effort")
+                              else f"Which AI's {cmd} do you want to change?", candidates, current=self.lead,
                               input_fn=self.input_fn, out=self.out)
             if name is CANCEL:
                 return
@@ -686,10 +1113,19 @@ class ChatSession:
         if name not in self.specs:
             self.out(f"{BADGE_WARN} Unknown AI '{name}'. Known: {', '.join(self.specs)}")
             return
-        if cmd == "model":
-            mc.pick_model(name, self.specs[name], self.input_fn, self.out)
+        if cmd in ("model", "lead-model"):
+            is_lead_model = cmd == "lead-model"
+            choice = mc.pick_model(name, self.specs[name], self.input_fn, self.out,
+                                   setting_key="lead_models" if is_lead_model else "models",
+                                   role_label="lead planning and review" if is_lead_model else "worker tasks",
+                                   inherit_worker=is_lead_model)
+            if isinstance(choice, str) and name != self.lead:
+                self.out(f"  Chat is still with {self.lead}; use /lead {name} to switch.")
         else:
-            mc.pick_effort(name, self.specs[name], self.input_fn, self.out)
+            lead_effort = cmd == "lead-effort"
+            mc.pick_effort(name, self.specs[name], self.input_fn, self.out,
+                           setting_key="lead_effort" if lead_effort else "effort",
+                           role_label="lead planning and review" if lead_effort else "worker tasks")
 
     # ---------------------------------------------------------- loop
     def welcome(self) -> None:
@@ -704,15 +1140,24 @@ class ChatSession:
                  f"project {c_cyan(str(self.project) if self.project else '(none yet)')}{state_line}")
         self.out(c_dim("Type what you want in plain English, e.g. \"build a todo app with FastAPI and tests\" "
                        "or \"why did t2 fail?\""))
-        self.out(c_dim("/help for commands · !cmd runs a shell command · /exit or Ctrl-D to quit\n"))
+        if self.office_url:
+            self.out(f"{c_bold('Live office')} {c_cyan(self.office_url)}  "
+                     + c_dim("watch your AI team work in the browser · /office opens it"))
+        self.out(c_dim("Type / for command suggestions · arrow keys choose · !cmd runs a shell command · /exit or Ctrl-D to quit\n"))
 
     def loop(self) -> int:
         _enable_history()
         self.select_lead()
+        if self.office_mode in ("on", "open"):
+            self.start_live_office()
         self.welcome()
         while True:
             try:
-                line = self.input_fn(c_green(c_bold("you › ")))
+                prompt = c_green(c_bold("you › "))
+                if self.interactive and self.input_fn is input:
+                    line = read_chat_line(prompt)
+                else:
+                    line = self.input_fn(prompt)
             except EOFError:
                 self.out("")
                 break
@@ -724,6 +1169,7 @@ class ChatSession:
                     break
             except KeyboardInterrupt:
                 self.out(c_dim("\nInterrupted - back in chat."))
+        self.stop_live_office()
         self.out(c_dim("Bye!"))
         return 0
 
@@ -739,6 +1185,12 @@ def _enable_history() -> None:
         except Exception:
             pass
         readline.set_history_length(1000)
+        readline.set_completer(_readline_command_completer)
+        readline.set_completer_delims(" \t\n")
+        if "libedit" in (readline.__doc__ or "").lower():
+            readline.parse_and_bind("bind ^I rl_complete")
+        else:
+            readline.parse_and_bind("tab: complete")
         atexit.register(lambda: _save_history(readline, hist))
     except Exception:
         pass
@@ -765,6 +1217,8 @@ def add_parser(subparsers) -> None:
     p = subparsers.add_parser("chat", help="Talk to OmniCLI like a chatbot (also: just run `omnicli`)")
     p.add_argument("-d", "--dir", help="Project folder (default: the current folder unless it's your home)")
     p.add_argument("--lead", help="Which AI to talk to (default: your `lead` setting, else the best ready one)")
+    p.add_argument("--no-office", action="store_true",
+                   help="Don't start the live office view (default: the `office` setting, normally on)")
     p.set_defaults(func=run)
 
 
@@ -774,4 +1228,7 @@ def run(args) -> int:
         project = Path(args.dir).expanduser().resolve()
     else:
         project = default_project()
-    return ChatSession(project=project, lead=getattr(args, "lead", None)).loop()
+    mode = "off" if getattr(args, "no_office", False) else str(settings.get("office") or "on").lower()
+    if mode not in ("on", "open", "off"):
+        mode = "on"
+    return ChatSession(project=project, lead=getattr(args, "lead", None), office_mode=mode).loop()

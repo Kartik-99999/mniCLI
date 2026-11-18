@@ -37,6 +37,7 @@ COMMAND_MODULES = [
     "budget",       # omnicli budget
     "pr",           # omnicli pr / pull-request
     "visual",       # omnicli visual screenshot + review
+    "office",       # omnicli office animated live team view
     "skills",       # omnicli skills leaderboard
     "memory",       # omnicli memory lessons
     "timeline",     # omnicli timeline flight recorder

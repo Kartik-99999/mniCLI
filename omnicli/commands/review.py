@@ -494,7 +494,9 @@ def _fix_config(target: Path, reviewer: str, workers: List[str], max_tasks: int)
         auto_approve=True,
         resume=True,
         models=dict(settings.get("models") or {}),
+        lead_models=dict(settings.get("lead_models") or {}),
         effort=dict(settings.get("effort") or {}),
+        lead_effort=dict(settings.get("lead_effort") or {}),
         max_calls=int(settings.get("max_calls") or 0),
         max_minutes=float(settings.get("max_minutes") or 0),
     )
@@ -503,9 +505,9 @@ def _fix_config(target: Path, reviewer: str, workers: List[str], max_tasks: int)
 
 
 def _with_saved_options(spec: Dict, name: str) -> Dict:
-    """The reviewer's spec with the user's saved model / effort (shared rules: agents.with_saved_options)."""
+    """The reviewer's spec with the user's saved lead model / effort."""
     from omnicli import agents as _ag
-    return _ag.with_saved_options(spec, name)
+    return _ag.with_saved_lead_options(spec, name)
 
 
 # --------------------------------------------------------------------------- handler

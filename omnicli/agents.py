@@ -70,7 +70,7 @@ _STRIP_ENV = ("CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT")
 # git push, pip install, ...). Headless agents cannot ask for permission, so anything
 # outside this list is auto-denied. Override per agent via ~/.omnicli/agents.json.
 WORKER_DEV_COMMANDS = [
-    "npm", "npx", "node", "pnpm", "yarn", "bun", "tsc",
+    "npm", "npx", "node", "pnpm", "yarn", "bun", "tsc", "vite", "vitest",
     "python3", "python", "pytest", "ruff",
     "go", "cargo", "make", "ls", "cat", "mkdir", "touch",
     # read-only inspection agents use constantly (not find: it has -delete/-exec)
@@ -131,7 +131,8 @@ BUILTIN_AGENTS: Dict[str, Dict] = {
         "edit": ["-p", "{prompt}", "--mode", "accept-edits", "--sandbox", "--settings", AGY_WORKER_SETTINGS],
         "model_args": ["--model", "{model}"],
         "effort_args": ["--effort", "{effort}"],
-        "effort_levels": ["low", "medium", "high", "xhigh", "max"],
+        # Antigravity CLI 1.5.11's /model selector offers only low, medium, and high.
+        "effort_levels": ["low", "medium", "high"],
         "add_dir_args": ["--add-dir", "{add_dir}"],
     },
     "muse": {
@@ -218,15 +219,61 @@ def with_options(spec: Dict, model: Optional[str] = None, effort: Optional[str] 
     effort = str(effort or "").strip()
     if model and out.get("model_args"):
         out["_model"] = model
-    if effort and out.get("effort_args") and (not out.get("effort_levels") or effort in out["effort_levels"]):
+    if effort and out.get("effort_args") and effort_supported(out, model, effort):
         out["_effort"] = effort
     return out
+
+
+def effort_levels(spec: Dict, model: Optional[str] = None) -> List[str]:
+    """Effort values safe for this adapter/model pair when the CLI exposes them."""
+    if not spec.get("effort_args"):
+        return []
+    levels = list(spec.get("effort_levels") or [])
+    # Antigravity model ids can encode a fixed reasoning tier (for example
+    # gemini-3.8-flash-high). Passing a different --effort to that model fails.
+    if str(spec.get("id") or "").lower() == "agy" and model:
+        match = re.search(r"-(none|minimal|low|medium|high|xhigh|max|ultra)$", str(model).lower())
+        if match:
+            return [match.group(1)]
+    return levels
+
+
+def effort_supported(spec: Dict, model: Optional[str], effort: str) -> bool:
+    """Whether an explicitly configured effort can safely be passed to a CLI."""
+    if model:
+        from omnicli.model_catalog import cached_effort_levels
+        discovered = cached_effort_levels(spec, str(model))
+        if discovered is not None:
+            return effort in discovered
+        # Without a recent Codex catalog row, the adapter's global union cannot
+        # prove that a tier is valid for this particular model.
+        if str(spec.get("id") or "").lower() == "codex":
+            return False
+    levels = effort_levels(spec, model)
+    return not levels or effort in levels
 
 
 def with_saved_options(spec: Dict, name: str) -> Dict:
     """`with_options` using the user's saved `models.<name>` / `effort.<name>` settings."""
     from omnicli import settings
     return with_options(spec, settings.get(f"models.{name}"), settings.get(f"effort.{name}"))
+
+
+def with_saved_lead_options(spec: Dict, name: str) -> Dict:
+    """Apply lead settings without carrying a worker tier onto a different model."""
+    from omnicli import settings
+    model = settings.get(f"lead_models.{name}")
+    worker_model = settings.get(f"models.{name}")
+    lead_effort = settings.get(f"lead_effort.{name}")
+    if model is None:
+        model = worker_model
+    elif str(model).lower() == "default":
+        out = with_options(spec, None, lead_effort)
+        out.pop("_model", None)
+        return out
+    if lead_effort is None and (settings.get(f"lead_models.{name}") is None or model == worker_model):
+        lead_effort = settings.get(f"effort.{name}")
+    return with_options(spec, model, lead_effort)
 
 
 def option_args(spec: Dict, mode: str, model: Optional[str] = None, effort: Optional[str] = None,
@@ -244,7 +291,8 @@ def option_args(spec: Dict, mode: str, model: Optional[str] = None, effort: Opti
     if model and spec.get("model_args"):
         out += [str(a).replace("{model}", str(model)) for a in spec["model_args"]]
     if effort and spec.get("effort_args"):
-        out += [str(a).replace("{effort}", str(effort)) for a in spec["effort_args"]]
+        if effort_supported(spec, model, effort):
+            out += [str(a).replace("{effort}", str(effort)) for a in spec["effort_args"]]
     if add_dirs and mode == "edit" and spec.get("add_dir_args"):
         for d in add_dirs:
             out += [str(a).replace("{add_dir}", str(d)) for a in spec["add_dir_args"]]

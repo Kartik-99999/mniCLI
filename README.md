@@ -21,7 +21,7 @@ Install OmniCLI from a checkout with `python3 -m pip install .`, then start chat
 omnicli
 #   you › build a todo app with FastAPI, SQLite and tests
 #   you › why did t2 fail?
-#   you › /status        (/help lists all commands; !ls runs a shell command; Ctrl-D quits)
+#   you › /              (live command menu; use arrow keys, then Enter to select)
 
 # Start a team run directly
 omnicli team "build a todo web app with a FastAPI backend, SQLite and tests" -d ./todo-app
@@ -46,8 +46,11 @@ omnicli recipe run static-landing-page -d ./my-landing-page
 ### Team workflow tools
 
 ```bash
-# Watch the live team dashboard
+# Watch agents, task progress, blockers, output, and completed work
 omnicli status --watch
+
+# Open the animated office view in your browser
+omnicli office -d ./todo-app
 
 # Adjust a running (or resumable) run's budget before its next agent call
 omnicli budget --dir ./todo-app --max-calls 12 --max-minutes 30
@@ -80,7 +83,20 @@ omnicli visual -d ./todo-app --start-command "python3 -m http.server 8000" --url
 omnicli pr --dir ./todo-app --base main --draft
 ```
 
-`--worktrees` requires a clean Git project and Git checkpoints. `--approve-tasks` shows each lead-reviewed diff before its checkpoint. `omnicli pr` uses the GitHub CLI (`gh`) and expects the branch to be pushed. `omnicli review --image` accepts screenshots captured with your desktop's screenshot tool.
+`--worktrees` requires Git checkpoints. If the project has uncommitted or untracked files, OmniCLI protects those paths, asks the lead to plan around them, and automatically isolates its own tasks in worktrees. If a plan still overlaps protected work, it stops before editing. `--approve-tasks` shows each lead-reviewed diff before its checkpoint. `omnicli pr` uses the GitHub CLI (`gh`) and expects the branch to be pushed. `omnicli review --image` accepts screenshots captured with your desktop's screenshot tool.
+`omnicli office` serves a live animated team view on loopback (only your own machine can open it). Pick a scene:
+**Office** (at their desk = working, walking around = waiting, asleep = free, at someone else's desk = checking
+their work) or **Cricket** (batting = working, bowling = checking work, non-striker = waiting, dugout = free).
+Add `#demo` to the address to preview every state. Press Ctrl-C in the terminal to stop the server.
+
+**Chat starts the office for you.** When you open `omnicli` (chat mode), the banner shows a local link such as
+`Live office http://127.0.0.1:8765/`. Open it once and keep it open: it follows whatever project the chat is
+working on. Before a run it shows your team at rest; when you ask for something, the team gets to work live.
+Type `/office` to open it in your browser, or `/office 1` to view a saved run. It stops when you leave the chat.
+Change this with `omnicli config set office open` (also opens the browser), `omnicli config set office off`
+(don't start it), or `omnicli chat --no-office` for a single session.
+In chat mode, typing `/` opens a live command menu. Use the arrow keys to highlight a command and Enter to
+insert it; add any arguments, then press Enter again to run it.
 
 ---
 
@@ -198,16 +214,24 @@ Run `omnicli` with no arguments in a terminal and talk to it in plain English, l
 ### 0a+. 🎛 Choose your team: lead, workers, models, effort
 | What | Command line | In chat |
 |---|---|---|
-| Guided setup of everything below | `omnicli setup` (`--show` to just view) | `/setup` · `/team` |
+| Build a custom team and choose each member's model | `omnicli setup` | `/team custom` · `/setup` |
+| Save, restore, or list named team lineups and model choices | `omnicli profiles save NAME` · `omnicli profile use NAME` | `/team save NAME` · `/team use NAME` · `/team list` |
 | Which AI leads (plans + reviews) | `omnicli config set lead agy` · `team --lead agy` | `/lead` (menu) |
 | Which AIs do the work | `omnicli config set workers claude,muse` · `team --workers ...` | `/workers` |
-| Each AI's model (from its own list) | `omnicli models` · `config set models.codex gpt-6-sol` · `team --model claude=opus` | `/model [agent]` |
-| Each AI's reasoning effort | `config set effort.agy high` · `team --effort agy=high` | `/effort [agent]` |
+| Worker model for each CLI | `omnicli models` · `config set models.codex gpt-6-sol` · `team --model codex=gpt-6-sol` | `/model [agent]` |
+| Lead model, independently from the same CLI's worker model | `config set lead_models.claude opus` · `team --lead-model claude=opus` | `/lead-model [agent]` or `/team custom` |
+| Worker reasoning effort | `config set effort.agy high` · `team --effort agy=high` | `/effort [agent]` |
+| Lead reasoning effort | `config set lead_effort.codex xhigh` · `team --lead-effort codex=xhigh` | `/lead-effort [agent]` |
 | Who does which task | at the plan prompt press **e**, then `t2=codex t3=muse` | same |
 
 Model lists come from the CLIs themselves: `agy models`, `codex debug models`, the aliases documented in
-`claude --help` (fable / opus / sonnet, or a full model name), and Muse's configured model (any other id is
-checked with `muse model-profile show`). Typed names are validated where the CLI can tell us.
+`claude --help` (fable / opus / sonnet, or a full model name), and Muse's live `model/list` catalog. Run
+`omnicli models muse --refresh` to refresh Muse's catalog; `/model` and setup show every returned model. Typed
+names are validated where the CLI can tell us. When a model exposes its own effort tiers, OmniCLI checks those
+before passing a saved effort; an unconfirmed Codex tier falls back to the CLI default.
+Each CLI has a worker model and an optional separate lead model. For example, Claude can use Sonnet for
+worker tasks and Opus for planning and review in the same run. Model choices are read from that CLI's own
+catalog. Save a lineup after configuring it with `/team save NAME`, then switch back with `/team use NAME`.
 
 ### 0b. 🧭 Claude-style session commands
 
@@ -226,7 +250,7 @@ Everything you'd reach for in Claude Code, for a team run:
 | `/rewind` | `omnicli undo TASK` (alias `rewind`) | `git revert` one task's checkpoint, mark it to redo |
 | `/export` | `omnicli export [--format md\|json\|html]` | Full run report; HTML is one self-contained file |
 | `/review` | `omnicli review [focus] [--fix]` | Lead reviews any project; `--fix` sends the team to fix it |
-| `--model`, effort | `omnicli team --model claude=opus --effort agy=high` | Per-agent model / reasoning effort |
+| `--model`, `--lead-model`, `--effort`, `--lead-effort` | `omnicli team --model claude=sonnet --lead-model claude=opus` | Separate worker and lead models and compatible reasoning effort tiers |
 | budget | `--max-calls N` · `--max-minutes M` | Stop cleanly when reached (exit 3); resume later |
 | `-p --output-format json` | `--json` · `-q` | One JSON summary line; quiet output |
 | `--add-dir` | `--add-dir DIR` | Extra folders workers may use (claude/codex/agy) |

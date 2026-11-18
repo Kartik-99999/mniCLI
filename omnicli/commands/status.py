@@ -4,7 +4,7 @@
     omnicli status                    current dir's run, else the most recent run
     omnicli status 2                  run #2 from `omnicli runs` (or a dir / name / goal fragment)
     omnicli status -d ~/code/app      the run in that project directory
-    omnicli status --watch [SECONDS]  redraw every N seconds (default 3) while the run is live
+    omnicli status --watch [SECONDS]  live agent dashboard: tasks, output, blockers and completed work
     omnicli status --json             machine-readable snapshot
 
 Everything comes from the run's own <dir>/.omnicli/team/state.json plus its logs/;
@@ -68,7 +68,7 @@ _STATUS_COLOR: Dict[str, Callable[[str], str]] = {
 def add_parser(subparsers) -> None:
     p = subparsers.add_parser(
         "status",
-        help="Show progress of a team run: phase, tasks, live worker output",
+        help="Show the live team dashboard: agents, tasks, output, blockers and completed work",
         description="Show progress of a team run. Picks -d DIR, else REF, else the run in the current "
                     "directory, else the most recent run.",
     )
@@ -236,6 +236,89 @@ def find_task_log(logs_dir: Path, task_id: str, known_agents=None) -> Optional[D
     return max(groups.values(), key=lambda g: (g["started"], g["n"]))
 
 
+def find_latest_agent_log(logs_dir: Path, agent: str, task_ids=None) -> Optional[Path]:
+    """Newest worker output log for an agent, including completed tasks."""
+    try:
+        entries = list(Path(logs_dir).iterdir())
+    except OSError:
+        return None
+    pat = re.compile(r"^(?P<task>.+)-" + re.escape(agent) + r"-\d+\.md$")
+    allowed = set(str(tid) for tid in task_ids or [])
+    candidates = []
+    for path in entries:
+        match = pat.match(path.name)
+        if not match:
+            continue
+        task_id = match.group("task")
+        if task_ids is not None and task_id not in allowed:
+            continue
+        try:
+            candidates.append((path.stat().st_mtime, path))
+        except OSError:
+            continue
+    return max(candidates, key=lambda item: item[0])[1] if candidates else None
+
+
+def find_active_review(logs_dir: Path, tasks: List[Dict], alive: bool, known_agents=None) -> Optional[Dict]:
+    """Find the newest lead-review prompt for a still-running task, if any."""
+    if not alive:
+        return None
+    try:
+        entries = list(Path(logs_dir).iterdir())
+    except OSError:
+        return None
+    pattern = re.compile(r"^lead-\d+-review-(?P<agent>.+)\.prompt\.md$")
+    by_id = {str(t.get("id") or "?"): t for t in tasks if isinstance(t, dict)}
+    candidates = []
+    for prompt in entries:
+        match = pattern.match(prompt.name)
+        if not match:
+            continue
+        try:
+            started = prompt.stat().st_mtime
+            contents = prompt.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        task_match = re.search(r"^TASK\s+([^\s:]+):", contents, re.M)
+        if not task_match:
+            continue
+        task_id = task_match.group(1)
+        task = by_id.get(task_id)
+        if not task or task.get("status") != "running":
+            continue
+        worker_log = find_task_log(Path(logs_dir), task_id, known_agents)
+        if worker_log and worker_log.get("started") and worker_log["started"] > started:
+            continue
+        output = prompt.with_name(prompt.name[:-len(".prompt.md")] + ".md")
+        candidates.append((started, {"agent": match.group("agent"), "task_id": task_id,
+                                     "task_title": str(task.get("title") or task_id),
+                                     "builder": str(task.get("agent_used") or task.get("assignee") or ""),
+                                     "output": output}))
+    return max(candidates, key=lambda item: item[0])[1] if candidates else None
+
+
+def _task_blockers(task: Dict, statuses: Dict[str, str], interrupted: bool) -> List[str]:
+    status = str(task.get("status") or "pending")
+    note = str(task.get("review_note") or "").strip()
+    if status == "failed":
+        if not note:
+            attempts = task.get("attempts") if isinstance(task.get("attempts"), list) else []
+            last = attempts[-1] if attempts and isinstance(attempts[-1], dict) else {}
+            result = str(last.get("result") or "")
+            note = result if result and result != "approved" else "Task failed; inspect its logs"
+        return [note]
+    if status == "skipped":
+        return [note or "Task was skipped"]
+    if status == "running" and interrupted:
+        return ["Run was interrupted while this task was running"]
+    if status == "pending":
+        deps = task.get("depends_on") if isinstance(task.get("depends_on"), list) else []
+        waiting = [str(dep) for dep in deps if statuses.get(str(dep)) != "done"]
+        if waiting:
+            return ["Waiting for " + ", ".join(waiting)]
+    return []
+
+
 def tail_lines(path: Optional[Path], count: int = TAIL_LINES, max_bytes: int = 16384) -> List[str]:
     """Last `count` non-empty lines of a (possibly huge) text file, cleaned of escape codes."""
     if not path:
@@ -263,13 +346,16 @@ def build_snapshot(project_dir, state: Dict, now: Optional[float] = None) -> Dic
 
     phase = str(state.get("phase") or "unknown")
     pid = _int(state.get("pid"))
-    alive = phase == "running" and runs.pid_alive(pid)
-    interrupted = phase == "running" and not alive
+    # the conductor records its pid from the start of planning, so a planning run is alive too
+    alive = phase in ("planning", "running") and runs.pid_alive(pid)
+    interrupted = phase in ("planning", "running") and not alive
     lead = str(state.get("lead") or "")
     workers = [str(w) for w in state.get("workers") or []] if isinstance(state.get("workers"), list) else []
 
     raw_tasks = [t for t in (state.get("tasks") or []) if isinstance(t, dict)] \
         if isinstance(state.get("tasks"), list) else []
+    task_statuses = {str(t.get("id") or "?"): str(t.get("status") or "pending") for t in raw_tasks}
+    raw_by_id = {str(t.get("id") or "?"): t for t in raw_tasks}
     known = set(workers) | ({lead} if lead else set())
     for t in raw_tasks:
         known.update(str(x) for x in (t.get("assignee"), t.get("agent_used")) if x)
@@ -292,8 +378,7 @@ def build_snapshot(project_dir, state: Dict, now: Optional[float] = None) -> Dic
             log = find_task_log(logs_dir, tid, known)
             info = {"agent": worker, "attempt": len(attempts) + 1, "elapsed": None, "lines": [], "source": ""}
             if log:
-                if not t.get("agent_used"):
-                    worker = log["agent"]
+                worker = log["agent"]
                 info["agent"] = log["agent"]
                 info["attempt"] = log["n"]
                 if alive and log["started"]:
@@ -316,6 +401,80 @@ def build_snapshot(project_dir, state: Dict, now: Optional[float] = None) -> Dic
             "commit": str(t.get("commit") or ""),
         })
     counts["total"] = len(tasks)
+    active_review = find_active_review(logs_dir, raw_tasks, alive, known)
+
+    # Agent summaries combine task state with the newest transcript line. Keep the
+    # configured lead/workers first, then include agents found in task history.
+    agent_order = list(dict.fromkeys(([lead] if lead else []) + workers + sorted(known)))
+    agents: List[Dict] = []
+    for agent in agent_order:
+        assigned = [t for t in tasks if t["worker"] == agent]
+        current = [t for t in assigned if t["status"] == "running"]
+        done = [t for t in assigned if t["status"] == "done"]
+        progress = {key: sum(1 for t in assigned if t["status"] == key)
+                    for key in ("done", "running", "pending", "failed", "skipped")}
+        progress["total"] = len(assigned)
+        blockers = [{"task_id": t["id"], "reason": reason}
+                    for t in assigned
+                    for reason in _task_blockers(raw_by_id.get(t["id"], {}), task_statuses, interrupted)]
+
+        latest_output = ""
+        reviewing_task = None
+        if active_review and active_review["agent"] == agent:
+            reviewing_task = {key: active_review[key] for key in ("task_id", "task_title", "builder")}
+            output_lines = tail_lines(active_review["output"], 1)
+            latest_output = output_lines[-1] if output_lines else "Reviewing the worker's changes"
+        elif current:
+            live_info = live.get(current[-1]["id"], {})
+            lines = live_info.get("lines") or []
+            if lines:
+                latest_output = lines[-1]
+            elif agent == "human":
+                latest_output = "Waiting for your input in the run terminal"
+        if not latest_output:
+            allowed_log_tasks = []
+            for raw in raw_tasks:
+                tid = str(raw.get("id") or "?")
+                attempts = raw.get("attempts") if isinstance(raw.get("attempts"), list) else []
+                ran_as_agent = any(isinstance(a, dict) and str(a.get("agent") or "") == agent for a in attempts)
+                if ran_as_agent or (raw.get("status") == "running" and
+                                    any(t["id"] == tid for t in assigned)):
+                    allowed_log_tasks.append(tid)
+            latest_log = find_latest_agent_log(logs_dir, agent, allowed_log_tasks)
+            output_lines = tail_lines(latest_log, 1)
+            latest_output = output_lines[-1] if output_lines else ""
+
+        if current:
+            agent_status = "working" if alive else "interrupted"
+        elif reviewing_task:
+            agent_status = "reviewing"
+        elif agent == lead and alive and phase == "planning":
+            agent_status = "planning"      # the lead is writing the plan
+        elif agent == lead and alive and sum(counts.values()) and not counts.get("running") \
+                and not counts.get("pending"):
+            agent_status = "checking"      # every task finished: the lead runs the final project check
+        elif blockers:
+            agent_status = "blocked"
+        elif progress["pending"]:
+            agent_status = "queued"
+        elif done:
+            agent_status = "done"
+        else:
+            agent_status = "idle"
+
+        agents.append({
+            "id": agent,
+            "role": "lead" if agent == lead else "worker",
+            "status": agent_status,
+            "progress": progress,
+            "current_tasks": [{"id": t["id"], "title": t["title"]} for t in current],
+            "latest_output": latest_output,
+            "reviewing_task": reviewing_task,
+            "blockers": blockers,
+            "completed_work": [{"id": t["id"], "title": t["title"],
+                                "summary": str(raw_by_id.get(t["id"], {}).get("summary") or "")}
+                               for t in done],
+        })
 
     final = state.get("final") if isinstance(state.get("final"), dict) and state.get("final") else None
     report = sdir / "REPORT.md"
@@ -334,6 +493,7 @@ def build_snapshot(project_dir, state: Dict, now: Optional[float] = None) -> Dic
         "updated_at": _float(state.get("updated_at")),
         "counts": counts,
         "tasks": tasks,
+        "agents": agents,
         "final": final,
         "report": str(report) if report.is_file() else None,
         "_live": live,
@@ -451,6 +611,48 @@ def render(snap: Dict, width: Optional[int] = None, now: Optional[float] = None)
         for r in cells:
             r[1] = _trunc(r[1], title_w)
         L += _table_lines(["ID", "Task", "Worker", "Status", "Tries", "Time", "Commit"], cells)
+
+    agents = snap.get("agents") or []
+    if agents:
+        L.append("")
+        L.append(f"  {c_bold('Agents')}")
+        state_color = {"working": c_yellow, "reviewing": c_magenta, "interrupted": c_red, "blocked": c_red,
+                       "queued": c_cyan, "done": c_green, "idle": c_dim}
+        for agent in agents:
+            progress = agent["progress"]
+            progress_txt = f"{progress['done']}/{progress['total']} tasks done"
+            if progress["running"]:
+                progress_txt += f" · {progress['running']} active"
+            if progress["pending"]:
+                progress_txt += f" · {progress['pending']} queued"
+            status_fn = state_color.get(agent["status"], c_dim)
+            L.append(f"  {c_cyan(agent['id'])} ({agent['role']}) · {status_fn(agent['status'])} · "
+                     f"{c_dim(progress_txt)}")
+
+            current = agent["current_tasks"]
+            if current:
+                current_txt = ", ".join(f"{t['id']} {t['title']}" for t in current)
+                L.append(f"    Current: {_trunc(current_txt, width - 15)}")
+            if agent.get("reviewing_task"):
+                review = agent["reviewing_task"]
+                L.append(f"    Reviewing: {review['task_id']} {review['task_title']} by {review['builder'] or '?'}")
+            elif agent["status"] == "queued":
+                L.append("    Current: waiting for a task or dependency")
+
+            if agent["latest_output"]:
+                L.append(f"    Latest: {_trunc(agent['latest_output'], width - 13)}")
+            if agent["blockers"]:
+                for blocker in agent["blockers"]:
+                    reason = _trunc(blocker["reason"], width - 21)
+                    L.append(f"    Blocker ({blocker['task_id']}): {reason}")
+            completed = agent["completed_work"]
+            for item in completed[:3]:
+                summary = " ".join(_clean(item["summary"]).split())
+                title = _trunc(item["title"], width - len(item["id"]) - 22)
+                detail = (" — " + _trunc(summary, width - len(item["id"]) - len(title) - 25)) if summary else ""
+                L.append(f"    Done: {item['id']} {title}{detail}")
+            if len(completed) > 3:
+                L.append(f"    Done: and {len(completed) - 3} more task(s)")
 
     live = snap.get("_live") or {}
     for tid, info in live.items():
