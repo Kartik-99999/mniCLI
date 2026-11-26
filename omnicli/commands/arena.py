@@ -7,7 +7,7 @@ import subprocess
 import time
 from pathlib import Path
 
-from omnicli import agents, runs
+from omnicli import agents, runs, settings
 from omnicli.conductor import MAX_DIFF_CHARS, TeamConfig, build_worker_prompt, verify_passed
 from omnicli.ui import BADGE_FAILED, BADGE_INFO, BADGE_WARN, c_bold, c_cyan
 
@@ -77,7 +77,9 @@ def run_arena(ref, task_id, agent_names, lead=None):
 
     from omnicli.conductor import Conductor
     cfg = TeamConfig(goal=state.get("goal", ""), project_dir=project, lead=lead or state.get("lead"),
-                     workers=list(agent_names), auto_approve=True, use_git=False)
+                     workers=list(agent_names), auto_approve=True, use_git=False,
+                     models=settings.get("models"), lead_models=settings.get("lead_models"),
+                     effort=settings.get("effort"), lead_effort=settings.get("lead_effort"))
     conductor = Conductor(cfg)
     if not conductor.select_team():
         raise ValueError("no usable AI CLI is available to run the arena")

@@ -233,6 +233,32 @@ Each CLI has a worker model and an optional separate lead model. For example, Cl
 worker tasks and Opus for planning and review in the same run. Model choices are read from that CLI's own
 catalog. Save a lineup after configuring it with `/team save NAME`, then switch back with `/team use NAME`.
 
+#### Compare reasoning effort on scored examples
+
+`omnicli tune` compares the current effort with `medium` and `high` for each installed adapter's
+configured worker and lead models. Shared model and effort settings need only one comparison. Each
+tier gets one read-only AI call in a fresh temporary folder with the same four code-reasoning questions.
+The score counts exact JSON answers, and the output includes elapsed time. These calls use provider quota.
+
+```sh
+omnicli tune                                # show scores and recommendations
+omnicli tune codex --efforts high,xhigh     # compare specific tiers for one adapter
+omnicli tune muse --all-models              # also evaluate models outside the configured team
+omnicli tune --cases examples.json --apply  # save strictly better scores on your own examples
+```
+
+Use examples from the work you care about. Each entry in the JSON file has a prompt and an expected
+JSON value. OmniCLI sends the questions to the selected provider and scores the answers locally.
+
+```json
+{"boundary": {"prompt": "For Python range(2, 5), return the included integers as an array.", "expected": [2, 3, 4]}}
+```
+
+With `--all-models`, each additional catalog model incurs its own calls. Only configured roles can
+receive saved settings. Ties keep the current setting. Failed CLI calls are reported separately. A higher score measures
+performance on the supplied examples. For a full implementation task, use `omnicli arena` to compare
+the agents using their saved model and effort settings.
+
 ### 0b. 🧭 Claude-style session commands
 
 Everything you'd reach for in Claude Code, for a team run:

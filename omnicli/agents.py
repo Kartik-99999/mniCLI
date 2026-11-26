@@ -241,14 +241,14 @@ def effort_levels(spec: Dict, model: Optional[str] = None) -> List[str]:
 def effort_supported(spec: Dict, model: Optional[str], effort: str) -> bool:
     """Whether an explicitly configured effort can safely be passed to a CLI."""
     if model:
-        from omnicli.model_catalog import cached_effort_levels
-        discovered = cached_effort_levels(spec, str(model))
+        from omnicli import model_catalog
+        discovered = model_catalog.cached_effort_levels(spec, str(model))
         if discovered is not None:
             return effort in discovered
-        # Without a recent Codex catalog row, the adapter's global union cannot
-        # prove that a tier is valid for this particular model.
+        # A saved Codex tier should still work tomorrow. Discovery refreshes
+        # expired metadata and returns no tiers for an unconfirmed model.
         if str(spec.get("id") or "").lower() == "codex":
-            return False
+            return effort in model_catalog.effort_levels(spec, model)
     levels = effort_levels(spec, model)
     return not levels or effort in levels
 

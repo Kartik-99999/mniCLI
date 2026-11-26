@@ -32,6 +32,7 @@ COMMAND_MODULES = [
     "review",       # omnicli review
     "chat",         # omnicli chat (and plain `omnicli` in a terminal)
     "models_cmd",   # omnicli models / setup
+    "tune",         # compare reasoning effort on scored examples
     "profiles",     # omnicli profiles / profile
     "compare",      # omnicli compare
     "budget",       # omnicli budget
