@@ -158,7 +158,7 @@ def pick_effort(name: str, spec: Dict, input_fn: In, out: Out, save: bool = True
                 model: Optional[str] = None, setting_key: str = "effort",
                 role_label: str = "worker tasks"):
     if model is None:
-        model = settings.get(f"models.{name}")
+        model = _model_for_effort(name, None, "lead_models" if setting_key == "lead_effort" else "models")
     levels = model_catalog.effort_levels(spec, model)
     if not levels:
         out(c_dim(f"  {name} has no reasoning-effort setting."))

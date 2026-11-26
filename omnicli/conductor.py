@@ -488,9 +488,8 @@ LOCAL SKILL HISTORY (aggregate outcomes only; use as a routing hint, not a guara
 {performance}
 
 RULES:
-- Use the FEWEST tasks that make sense, at most {max_tasks}: a small script or library needs 2-4 tasks, a full-stack
-  app maybe 6-10. Each must be doable by one agent in one session (about 5-20 minutes of work). Every extra task
-  costs a worker run plus a lead review, so don't split work that one agent can do well in one go.
+- Read the relevant entry points and existing tests before naming interfaces or proposing new files.
+  Use the fewest tasks needed, at most {max_tasks}. A focused change can be one task including its checks.
 - Translate the user's requested outcome into concrete, user-visible behaviors. Give every task specific acceptance
   criteria that describe what a person can do and observe, not just which files should exist. For broad product goals,
   cover the main workflows from start to finish and reserve time for integration and usability fixes.
@@ -524,7 +523,7 @@ RULES:
 - If the goal asks for a tool that is NOT installed (e.g. pytest), still deliver what was asked, but make it runnable
   with what IS installed - e.g. write tests as unittest.TestCase classes (pytest runs those too) and verify with
   `python3 -m unittest` - and mention the missing tool in the README's setup section.
-- Include tests where they make sense, and end with a task that writes a README explaining how to run the project.
+- Include the checks that demonstrate the change. Document new setup or usage where users already look for it.
 
 Reply with ONLY a JSON object (no prose) of this shape:
 {{"project_name": "kebab-case-name", "summary": "one paragraph describing the approach and architecture",
@@ -589,6 +588,8 @@ def build_worker_prompt(task: Task, goal: str, project_dir: Path, agent_name: st
         "RULES:",
         f"- Work only inside {project_dir}." if not extra_dirs else
         f"- Work only inside {project_dir} and these extra directories you were given access to: {', '.join(extra_dirs)}.",
+        "- Trace the existing entry point and its callers before editing. Exercise the changed behavior and report "
+        "which checks ran, their results, and any checks you could not run.",
         "- Implement the requested behavior, not a visual placeholder or a control that only looks interactive. "
         "If any acceptance criterion cannot be completed, say exactly what remains unfinished.",
         "- For user-facing UI, deliver a cohesive, finished screen: intentional hierarchy and spacing, responsive "
@@ -1200,7 +1201,7 @@ class Conductor:
         pathspec = [":(literal)" + path for path in scope] if scope else ["."]
         files = subprocess.run(["git", "diff", "--cached", "--name-only", "--relative", "HEAD", "--"] + pathspec,
                                cwd=str(workspace), capture_output=True, text=True).stdout.splitlines()
-        diff = subprocess.run(["git", "diff", "--cached", "--stat", "--relative", "HEAD", "--"] + pathspec,
+        diff = subprocess.run(["git", "diff", "--cached", "--stat", "--patch", "--relative", "HEAD", "--"] + pathspec,
                               cwd=str(workspace), capture_output=True, text=True).stdout
         patch = subprocess.run(["git", "diff", "--cached", "--binary", "HEAD", "--"] + pathspec,
                                cwd=str(workspace), capture_output=True, text=True).stdout
@@ -1381,7 +1382,7 @@ class Conductor:
 
     # ---------------------------------------------------------------- lead
     def ask_lead(self, kind: str, prompt: str, required_key: str,
-                 exclude_vendor: Optional[str] = None) -> Optional[Dict]:
+                 exclude_vendor: Optional[str] = None, workspace: Optional[Path] = None) -> Optional[Dict]:
         """Ask the lead for a JSON decision; on failure fall back to another healthy agent as lead.
 
         Returns None when no lead answers, including when the session budget is used up
@@ -1420,7 +1421,7 @@ class Conductor:
                             spec.pop("_effort", None)
                     if lead_effort is not None:
                         spec["_effort"] = lead_effort
-                run = ag.run_agent(spec, p, "readonly", str(self.dir),
+                run = ag.run_agent(spec, p, "readonly", str(workspace or self.dir),
                                    timeout=self.cfg.lead_timeout_min * 60,
                                    log_path=self.logs / f"lead-{n:03d}-{kind}-{name}.md",
                                    meta={"kind": kind, "run_dir": str(self.dir)})
@@ -1451,7 +1452,7 @@ class Conductor:
                 time.sleep(min(30.0, reset_at - time.time()))
                 self.quota_resets = ledger.active_quota_resets()
             if not self.stopping:
-                return self.ask_lead(kind, prompt, required_key)
+                return self.ask_lead(kind, prompt, required_key, exclude_vendor=exclude_vendor, workspace=workspace)
         return None
 
     # ---------------------------------------------------------------- plan
@@ -1902,7 +1903,7 @@ class Conductor:
                 self.say(f"  {c_dim('lead ' + self.lead + ' reviewing ' + t.id + '...')}")
                 verdict = self.ask_lead("review", build_review_prompt(
                     t, self.goal, agent, summary, changes, verify, revision, self.cfg.retries), "verdict",
-                    exclude_vendor=self._vendor(agent) if self.cfg.cross_vendor_review else None)
+                    exclude_vendor=self._vendor(agent) if self.cfg.cross_vendor_review else None, workspace=workspace)
                 if self.stopping:
                     return
                 if verdict is None:

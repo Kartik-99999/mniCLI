@@ -190,12 +190,13 @@ class TestOmniCLIEngine(unittest.TestCase):
 
 class TestOmniCLIRecipes(unittest.TestCase):
     def test_recipe_manager(self):
-        rm = RecipeManager()
-        recipes = rm.list_recipes()
-        self.assertGreater(len(recipes), 0)
-        pipe = rm.get_pipeline("static-landing-page")
-        self.assertIsNotNone(pipe)
-        self.assertEqual(pipe.name, "static-landing-page")
+        with tempfile.TemporaryDirectory() as folder:
+            rm = RecipeManager(Path(folder))
+            recipes = rm.list_recipes()
+            self.assertGreater(len(recipes), 0)
+            pipe = rm.get_pipeline("static-landing-page")
+            self.assertIsNotNone(pipe)
+            self.assertEqual(pipe.name, "static-landing-page")
 
 
 if __name__ == "__main__":

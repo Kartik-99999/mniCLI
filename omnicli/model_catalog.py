@@ -147,7 +147,9 @@ def discover(name: str, spec: Dict, refresh: bool = False, runner: Optional[Call
     hit = cache.get(name)
     if not refresh and hit and time.time() - hit.get("at", 0) < CACHE_TTL_SEC and runner is None:
         stale_muse_cache = name == "muse" and hit.get("data", {}).get("source") != "muse serve model/list"
-        if not stale_muse_cache:
+        # Older builds silently discarded object-form Codex tiers.
+        stale_codex_cache = name == "codex" and hit.get("tier_format") != 2
+        if not stale_muse_cache and not stale_codex_cache:
             return hit["data"]
 
     from omnicli.agents import resolve_bin
@@ -175,11 +177,13 @@ def discover(name: str, spec: Dict, refresh: bool = False, runner: Optional[Call
                            + (f" (default effort {eff})" if eff else "")}
                     levels = m.get("supported_reasoning_levels")
                     if isinstance(levels, list):
-                        row["effort_levels"] = [str(level) for level in levels if isinstance(level, str)]
+                        values = [level.get("effort") if isinstance(level, dict) else level for level in levels]
+                        row["effort_levels"] = list(dict.fromkeys(v for v in values if isinstance(v, str) and v))
                     data["models"].append(row)
         except ValueError:
             pass
         data.update(source="codex debug models", cli_default=_codex_current())
+        cacheable = bool(data["models"])
     elif name == "claude" and _bin_is(spec, "claude"):
         data["models"] = [{"id": a, "name": d} for a, d in CLAUDE_ALIASES]
         data.update(source="claude --help", note="or type a full model name")
@@ -200,6 +204,8 @@ def discover(name: str, spec: Dict, refresh: bool = False, runner: Optional[Call
 
     if runner is None and cacheable:
         cache[name] = {"at": time.time(), "data": data}
+        if name == "codex":
+            cache[name]["tier_format"] = 2
         _save_cache(cache)
     return data
 
@@ -233,6 +239,8 @@ def cached_effort_levels(spec: Dict, model: str) -> Optional[List[str]]:
             continue
         levels = row.get("effort_levels")
         if isinstance(levels, list):
+            if name == "codex" and not levels and hit.get("tier_format") != 2:
+                return None
             return [str(level) for level in levels if isinstance(level, str)]
         # The Codex catalog can list a model but omit its supported tiers. Treat
         # that as unknown so a union of other models' tiers is never sent to it.
@@ -250,8 +258,8 @@ def effort_levels(spec: Dict, model: Optional[str] = None, runner: Optional[Call
             if row.get("id") == model:
                 if isinstance(row.get("effort_levels"), list):
                     return list(row["effort_levels"])
-                if str(spec.get("id") or "") == "codex":
-                    return []
                 break
+        if spec.get("id") == "codex":
+            return []
     from omnicli.agents import effort_levels as adapter_effort_levels
     return adapter_effort_levels(spec, model)

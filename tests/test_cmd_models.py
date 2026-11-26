@@ -110,6 +110,23 @@ class TestCatalog(Base):
         self.assertEqual(muse["models"][0]["effort_levels"], ["low", "medium", "high", "max"])
         self.assertIn("(meta)", muse["models"][0]["name"])
 
+    def test_codex_structured_tiers_replace_old_cache_and_reach_invocation(self):
+        from omnicli import agents
+        spec = self.specs()["codex"]
+        model_catalog._save_cache({"codex": {"at": model_catalog.time.time(), "data": {"models": [
+            {"id": "model-a", "effort_levels": []}]}}})
+        current = {"models": [{"slug": "model-a", "supported_reasoning_levels": [
+            {"effort": "low"}, {"effort": "high", "description": "more reasoning"}, "high", {}, None]}]}
+        settings.set_value("models.codex", "model-a")
+        settings.set_value("effort.codex", "high")
+        with mock.patch.object(model_catalog, "_run", return_value=json.dumps(current)) as run:
+            configured = agents.with_saved_options(spec, "codex")
+            argv = agents.build_command(configured, "edit", "task", "/project")
+            self.assertIn('model_reasoning_effort="high"', argv)
+            self.assertEqual(model_catalog.effort_levels(spec, "model-a"), ["low", "high"])
+            self.assertEqual(model_catalog.effort_levels(spec, "absent"), [])
+            run.assert_called_once()
+
     def test_wrong_binary_never_trusted(self):
         sp = self.specs()
         sp["agy"]["bin"] = self.fake_bin("something-else")
@@ -268,6 +285,15 @@ class TestSetupAndPickers(Base):
         self.assertEqual(choice, "high")
         self.assertEqual(settings.get("lead_effort.codex"), "high")
         self.assertIsNone(settings.get("effort.codex"))
+
+    def test_lead_effort_picker_uses_lead_model_including_cli_default(self):
+        settings.set_value("models.muse", "worker-model")
+        spec = self.specs()["muse"]
+        for lead_model, expected in (("lead-model", "lead-model"), ("default", None)):
+            settings.set_value("lead_models.muse", lead_model)
+            with mock.patch.object(model_catalog, "effort_levels", return_value=["high"]) as levels:
+                models_cmd.pick_effort("muse", spec, scripted(["1"]), self.out.append, setting_key="lead_effort")
+            levels.assert_called_once_with(spec, expected)
 
     def test_models_lists_every_discovered_model(self):
         from types import SimpleNamespace

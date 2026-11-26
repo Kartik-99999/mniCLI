@@ -11,6 +11,7 @@ import sys
 import tempfile
 import time
 import unittest
+from unittest import mock
 from pathlib import Path
 
 os.environ["OMNICLI_HOME"] = tempfile.mkdtemp(prefix="omnicli-test-home-")
@@ -74,8 +75,21 @@ class TestArenaEndToEnd(unittest.TestCase):
         runs.register_run({"dir": str(self.proj), "goal": "fake goal", "phase": "complete"})
 
     def test_full_arena_run(self):
+        from omnicli import agents, settings
         from omnicli.commands.arena import run_arena
-        record = run_arena(str(self.proj), "t1", ["w1", "w2"], "judge")
+        specs = agents.load_agent_specs()
+        for name in ("w1", "judge"):
+            specs[name].update(model_args=["--model", "{model}"], effort_args=["--effort", "{effort}"],
+                               effort_levels=["low", "high"])
+        saved = dict(settings.load(), models={"w1": "worker"}, effort={"w1": "high"},
+                     lead_models={"judge": "reviewer"}, lead_effort={"judge": "low"})
+        with mock.patch.object(settings, "load", return_value=saved), \
+                mock.patch.object(agents, "load_agent_specs", return_value=specs), \
+                mock.patch.object(agents, "run_agent", wraps=agents.run_agent) as calls:
+            record = run_arena(str(self.proj), "t1", ["w1", "w2"], "judge")
+        selections = {c.args[0]["id"]: (c.args[0].get("_model"), c.args[0].get("_effort")) for c in calls.call_args_list}
+        self.assertEqual(selections["w1"], ("worker", "high"))
+        self.assertEqual(selections["judge"], ("reviewer", "low"))
         self.assertIn(record["winner"], ("w1", "w2"))
         self.assertEqual(record["blind_label"], "A")
         self.assertEqual(sorted(c["label"] for c in record["candidates"]), ["A", "B"])

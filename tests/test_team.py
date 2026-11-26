@@ -399,7 +399,24 @@ class TestConductorEndToEnd(unittest.TestCase):
 
     def test_worktree_run_merges_approved_changes_to_project(self):
         c = self.make({"alpha": "good"}, lead="alpha", use_worktrees=True, jobs=1)
-        rc = c.run()
+        run_agent = ag.run_agent
+        reviewed = []
+
+        def inspect(spec, prompt, mode, cwd, **kwargs):
+            if kwargs.get("meta", {}).get("kind") == "review":
+                workspace = Path(cwd)
+                self.assertNotEqual(workspace, self.proj)
+                self.assertEqual(mode, "readonly")
+                self.assertIn("diff --git", prompt)
+                reviewed.append(workspace.name)
+                if workspace.name == "t1":
+                    self.assertTrue((workspace / "a/a.txt").is_file())
+                    self.assertFalse((self.proj / "a/a.txt").exists())
+            return run_agent(spec, prompt, mode, cwd, **kwargs)
+
+        with mock.patch.object(ag, "run_agent", side_effect=inspect):
+            rc = c.run()
+        self.assertCountEqual(reviewed, ["t1", "t2", "t3"])
         self.assertEqual(rc, 0)
         self.assertTrue((self.proj / "a/a.txt").is_file())
         self.assertTrue((self.proj / "README.md").is_file())
