@@ -67,6 +67,7 @@ def main():
         plan = {
             "project_name": "fake-project",
             "summary": "Two independent parts built in parallel, then a README.",
+            "workflows": [{"kind": "inspection", "scenario": "Read the assembled project documentation.", "check_task": "t3"}],
             "tasks": [
                 {"id": "t1", "title": "Part A", "assignee": w1, "instructions": "make a/a.txt",
                  "owns": ["a/"], "verify": "test -f a/a.txt"},
@@ -100,10 +101,12 @@ def main():
         if mode == "followup" and bump("finals") == 0 and "followup_tasks" in prompt and "must be []" not in prompt:
             worker = re.findall(r"^- (\w+): ", prompt.split("WORKERS:")[1], flags=re.M)[0]
             print(json.dumps({"complete": False, "summary": "almost", "how_to_run": "", "remaining_issues": ["extra missing"],
+                              "workflow_results": {"W1": {"status": "met", "evidence": "README.md exists."}},
                               "followup_tasks": [{"title": "Extra", "assignee": worker, "instructions": "make extra",
                                                   "owns": ["extra"], "verify": ""}]}))
         else:
             print(json.dumps({"complete": True, "summary": "fake project built", "how_to_run": "cat README.md",
+                              "workflow_results": {"W1": {"status": "met", "evidence": "README.md describes the project."}},
                               "remaining_issues": [], "followup_tasks": []}))
         return
 

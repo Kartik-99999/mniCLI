@@ -537,7 +537,9 @@ TEAM (AI CLIs that are ready):
 {workers_block}
 {images}
 WHAT YOU CAN DO
-1. Answer and discuss - questions about the project, the team's work, failures, next steps. Be concise.
+1. Answer and discuss. For a research request, investigate the relevant project files and accessible primary
+   sources. Cite the file or document supporting important claims. Say which details are inferred or unverified.
+   For a quick factual question, answer directly.
 2. Start the team building - when the user asks to create, build, add, change or fix code, reply with
    one short sentence about what you'll have the team do, then on the LAST line:
    ACTION: {{"type": "build", "goal": "<precise, self-contained goal: what to build or change, language/framework, tests>", "dir": "<folder, or empty to use the current project>"}}
@@ -825,9 +827,12 @@ class ChatSession:
         self.out(c_dim(f"\nBack in chat · project {target}"))
         return rc
 
-    def do_action(self, action: Dict) -> None:
+    def do_action(self, action: Dict, user_request: str = "") -> None:
         if action.get("type") == "build":
-            self.start_build(str(action.get("goal") or ""), str(action.get("dir") or ""),
+            goal = str(action.get("goal") or "").strip()
+            if user_request and user_request.strip() != goal:
+                goal = user_request + ("\n\nBuild brief from the conversation:\n" + goal if goal else "")
+            self.start_build(goal, str(action.get("dir") or ""),
                              images=getattr(self, "_current_images", []))
         elif action.get("type") == "command":
             argv, why = sanitize_command(action.get("args") or [], self.project)
@@ -892,7 +897,7 @@ class ChatSession:
             self.out(f"{c_magenta(c_bold(self.last_answerer or self.lead or 'omnicli'))} › {reply}")
             self.history.append(("assistant", reply[:TURN_CHARS]))
         if action:
-            self.do_action(action)
+            self.do_action(action, user_request=line)
         return True
 
     def slash(self, rest: str) -> bool:

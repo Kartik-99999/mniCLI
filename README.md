@@ -130,12 +130,21 @@ How it behaves:
   are left off the team with the reason shown. Successful pings are cached for 6 h; failures are re-checked every run.
 - **Self-healing** – if a worker crashes, times out or turns out to be logged out, its task is handed to another worker.
   If the lead fails, another ready agent takes over as lead.
-- **Review loop** – after each task OmniCLI runs the task's `verify` command, then the lead reviews the diff and either
-  approves or sends precise revision instructions back to the worker (`--retries`, default 1).
+- **Plan by workflow.** The lead names the actions a user should be able to perform, the observable outcomes,
+  and the task whose test exercises each one. Workers receive the original goal, shared implementation
+  decisions, and these workflows. Chat builds also carry the user's original request alongside the proposed brief.
+- **Repair failed behavior.** A failing task check goes back to the worker with its command and output.
+  The lead reviews the work after the check stops failing. A rejected isolated worktree is retained for inspection.
+  The `--retries` setting controls the number of repair attempts (default 1).
 - **Honest final check** – before the lead's final review, OmniCLI re-runs every task's `verify` command on the
   finished project and gives the lead the real results (the lead itself is read-only and can't run commands).
   A worker that exits 0 but produces nothing (e.g. a tool was auto-denied headlessly) counts as failed and the task
-  moves to another worker.
+  moves to another worker. The report lists the evidence for each agreed workflow. Unmet or unverified
+  workflows keep the run incomplete and can trigger focused repairs within the configured rounds and budget.
+  For an interactive workflow, the final review requires a linked executable check and a specific observation.
+
+  For a Word, PowerPoint, and Excel-style suite, examples include reopening a formatted document, presenting
+  slides in their new order, and recalculating a spreadsheet formula after a cell edit.
 - **Checkpoints** – each finished task is a git commit (`t2: Backend API [muse]`), so you can inspect or revert any
   agent's work. Logs and state live in `<project>/.omnicli/team/` (git-excluded); the final `REPORT.md` is there too.
 - **Safe by default** – workers use each CLI's own safe auto-edit mode (Claude `acceptEdits` + an allow-list of
