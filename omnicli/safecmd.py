@@ -55,7 +55,7 @@ _SUBCOMMANDS = {
 }
 _FREE_ARGS = {  # programs whose arguments are only path-checked
     "test", "[", "grep", "diff", "cmp", "ls", "wc", "head", "tail", "sort", "uniq", "cat", "true", "false",
-    "pytest", "jest", "vitest", "mocha", "ruff", "eslint", "tsc", "rspec", "phpunit", "make",
+    "pytest", "jest", "vitest", "mocha", "ruff", "mypy", "flake8", "eslint", "tsc", "rspec", "phpunit", "make",
 }
 _LAUNCHERS = {"python", "python3", "node", "npx", "deno", "go", "cargo"} | _PKG_RUNNERS
 ALLOWED_PROGRAMS = {"python", "python3", "node", "npx"} | _PKG_RUNNERS | set(_SUBCOMMANDS) | _FREE_ARGS
@@ -271,8 +271,8 @@ def verify_allowed(cmd: str, policy: str = "strict", project_dir=None) -> Tuple[
 _HOME_TOOLCHAIN_READ = ["Library/Python", "Library/Caches", ".cache", ".npm", ".pyenv", ".nvm", ".cargo",
                         ".rustup", "go", ".local/lib", ".deno", ".bun", ".gradle", ".m2", "Library/pnpm",
                         ".volta", ".asdf"]
-_HOME_TOOLCHAIN_EXEC = [".pyenv", ".nvm", ".cargo/bin", ".rustup", "go/bin", ".deno/bin", ".bun/bin", ".volta",
-                        ".asdf", "Library/pnpm"]
+_HOME_TOOLCHAIN_EXEC = ["Library/Python", ".pyenv", ".nvm", ".cargo/bin", ".rustup", "go/bin", ".deno/bin", ".bun/bin",
+                        ".volta", ".asdf", "Library/pnpm"]
 _DENIED_TOOLS = ["/usr/bin/security", "/usr/bin/osascript", "/usr/bin/open", "/usr/bin/curl", "/usr/bin/ssh",
                  "/usr/bin/scp", "/usr/bin/sftp", "/usr/bin/nc", "/usr/bin/ftp", "/usr/bin/git"]
 

@@ -82,7 +82,17 @@ def main():
 
     if "[OmniCLI team - task assignment]" in prompt:
         tid = re.search(r"YOUR TASK \(([^)]+)\)", prompt).group(1)
-        rel = FILES.get(tid, f"{tid}.txt")
+        rel = FILES.get(tid)
+        if rel is None:
+            # like a well-behaved worker: stay inside the first path this task owns, if it owns any
+            owned = re.search(r"^Files/dirs you own: (.+)$", prompt, flags=re.M)
+            first = owned.group(1).split(",")[0].strip().strip("/") if owned else ""
+            if not first or first.startswith("(") or first == ".":
+                rel = f"{tid}.txt"
+            elif "." in first.rsplit("/", 1)[-1]:
+                rel = first                      # owns a single file: write that file
+            else:
+                rel = f"{first}/{tid}.txt"       # owns a folder: write inside it
         target = Path.cwd() / rel
         target.parent.mkdir(parents=True, exist_ok=True)
         rev = "REVISION #" in prompt

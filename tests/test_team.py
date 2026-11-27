@@ -53,8 +53,31 @@ class TestHelpers(unittest.TestCase):
         self.assertEqual(ag.extract_json('{"a": 1}'), {"a": 1})
         self.assertEqual(ag.extract_json('Sure!\n```json\n{"tasks": [1]}\n```\nbye', "tasks"), {"tasks": [1]})
         self.assertEqual(ag.extract_json('noise {not json} then {"verdict": "approve"}', "verdict"), {"verdict": "approve"})
+        self.assertEqual(
+            ag.extract_json('Example: {"verdict": "revise"} Final: {"verdict": "approve", "feedback": ""}', "verdict"),
+            {"verdict": "approve", "feedback": ""},
+        )
         self.assertIsNone(ag.extract_json("no json here"))
         self.assertIsNone(ag.extract_json('{"other": 1}', "tasks"))
+
+    def test_ping_uses_low_effort_when_supported(self):
+        spec = dict(ag.BUILTIN_AGENTS["claude"], id="claude")
+        with mock.patch.object(ag, "run_agent", return_value=ag.AgentRun("claude", 0, "PONG", "", 0.2)) as call:
+            ok, _reason = ag._ping(spec, "/tmp", 30)
+        self.assertTrue(ok)
+        self.assertEqual(call.call_args.args[0].get("_effort"), "low")
+        # Fixed-tier agy without an explicit model should not force --effort low
+        agy_spec = dict(ag.BUILTIN_AGENTS["agy"], id="agy")
+        with mock.patch.object(ag, "run_agent", return_value=ag.AgentRun("agy", 0, "PONG", "", 0.2)) as call:
+            ok, _reason = ag._ping(agy_spec, "/tmp", 30)
+        self.assertTrue(ok)
+        self.assertIsNone(call.call_args.args[0].get("_effort"))
+
+    def test_parse_quota_reset_formats(self):
+        now = 1795000000.0
+        self.assertIsNotNone(ag.parse_quota_reset("resets at 23:59", now=now))
+        rel = ag.parse_quota_reset("limit reached, try again in 12 minutes", now=now)
+        self.assertEqual(rel, now + 720)
 
     def test_paths_overlap(self):
         self.assertTrue(paths_overlap(["src"], ["src/app.py"]))
@@ -202,6 +225,12 @@ class TestHelpers(unittest.TestCase):
             staged = subprocess.run(["git", "diff", "--cached", "--name-only"], cwd=root,
                                     capture_output=True, text=True, check=True).stdout.splitlines()
             self.assertEqual(staged, ["owned/task.txt"])
+            # Missing sibling path in `owns` must not cause git add to abort staging existing paths
+            (root / "owned" / "new_file.txt").write_text("new", encoding="utf-8")
+            self.assertEqual(
+                conductor._changed_files(["owned/new_file.txt", "owned/not_created.txt"]),
+                ["owned/new_file.txt"],
+            )
 
     def test_build_command_substitutes(self):
         spec = {"bin": sys.executable, "edit": ["-p", "{prompt}", "--cwd={dir}"]}
@@ -212,14 +241,21 @@ class TestHelpers(unittest.TestCase):
         r = ag.AgentRun("agy", 0, "  \n", "jetski: ... so it was auto-denied.", 1.0)
         self.assertFalse(r.ok)
         self.assertIn("auto-denied", r.failure_reason())
+        diagnostic = ag.AgentRun("agy", 0, "", "read_url(example.com) was auto-denied", 1.0)
+        self.assertIn("read_url(example.com)", diagnostic.failure_reason())
         self.assertTrue(ag.AgentRun("x", 0, "done", "", 1.0).ok)
 
     def test_agy_worker_gets_command_allow_list(self):
         edit = ag.BUILTIN_AGENTS["agy"]["edit"]
         settings = json.loads(edit[edit.index("--settings") + 1])
+        self.assertEqual(edit[edit.index("--mode") + 1], "auto")
+        self.assertIn("--sandbox", edit)
         self.assertIn("command(python3)", settings["permissions"]["allow"])
         self.assertIn("command(vite)", settings["permissions"]["allow"])
         self.assertIn("command(vitest)", settings["permissions"]["allow"])
+        for allowed in ("command(rg)", "command(git status)", "command(git diff)", "command(git log)",
+                        "command(git show)", "command(sed -n)"):
+            self.assertIn(allowed, settings["permissions"]["allow"])
         self.assertNotIn("command(rm)", settings["permissions"]["allow"])
 
     def test_builtin_adapters_never_bypass_permissions(self):
@@ -320,6 +356,82 @@ class TestConductorEndToEnd(unittest.TestCase):
         committed = subprocess.run(["git", "show", "--name-only", "--format=", "HEAD"], cwd=self.proj,
                                    capture_output=True, text=True, check=True).stdout.splitlines()
         self.assertEqual(committed, ["src/app.txt"])
+
+    def _repo_with_src(self):
+        self.proj.mkdir(parents=True)
+        for cmd in (["git", "init", "-q"], ["git", "config", "user.name", "Test"],
+                    ["git", "config", "user.email", "test@example.invalid"]):
+            subprocess.run(cmd, cwd=self.proj, check=True)
+        (self.proj / "src").mkdir()
+        (self.proj / "src" / "app.txt").write_text("base", encoding="utf-8")
+        (self.proj / "README.md").write_text("original readme", encoding="utf-8")
+        subprocess.run(["git", "add", "-A"], cwd=self.proj, check=True)
+        subprocess.run(["git", "commit", "-q", "-m", "initial"], cwd=self.proj, check=True)
+
+    def test_out_of_scope_changes_ignore_own_scope_other_tasks_and_build_output(self):
+        self._repo_with_src()
+        c = self.make({"alpha": "good"}, lead="alpha")
+        c.setup_git()
+        task = Task("t1", "Build app", "alpha", "edit app", owns=["src"])
+        other = Task("t2", "Docs", "alpha", "docs", owns=["docs"], status="running")
+        c.tasks = [task, other]
+        before = c._dirty_fingerprint()
+        (self.proj / "src" / "app.txt").write_text("in scope", encoding="utf-8")
+        (self.proj / "docs").mkdir()
+        (self.proj / "docs" / "guide.md").write_text("other task's file", encoding="utf-8")
+        (self.proj / "__pycache__").mkdir()
+        (self.proj / "__pycache__" / "x.cpython-39.pyc").write_bytes(b"cache")
+        (self.proj / "README.md").write_text("sneaky edit", encoding="utf-8")
+        (self.proj / "notes.txt").write_text("new stray file", encoding="utf-8")
+        self.assertEqual(c._out_of_scope_changes(task, before), ["README.md", "notes.txt"])
+        self.assertEqual(c._out_of_scope_changes(task, None), [])
+
+    def _run_with_worker_edits(self, attempts, retries):
+        """Run one scoped task in the shared checkout; attempts[i] = files the worker writes on try i."""
+        self._repo_with_src()
+        c = self.make({"alpha": "good"}, lead="alpha", jobs=1, retries=retries)
+        c.workers = ["alpha"]
+        c.setup_git()
+        task = Task("t1", "Build app", "alpha", "edit app", owns=["src"])
+        c.tasks = [task]
+        calls = []
+
+        def worker(spec, prompt, mode, cwd, **kwargs):
+            edits = attempts[min(len(calls), len(attempts) - 1)]
+            calls.append(prompt)
+            for rel, text in edits.items():
+                (Path(cwd) / rel).write_text(text, encoding="utf-8")
+            return ag.AgentRun("alpha", 0, "SUMMARY: did it", "", 0.1)
+
+        approve = {"verdict": "approve", "feedback": "", "summary": "looks good"}
+        with mock.patch.object(ag, "run_agent", side_effect=worker), \
+                mock.patch.object(c, "ask_lead", return_value=approve) as lead:
+            c._run_task(task)
+        return c, task, calls, lead
+
+    def test_out_of_scope_edit_cannot_be_approved_until_undone(self):
+        c, task, calls, lead = self._run_with_worker_edits(
+            [{"src/app.txt": "feature", "README.md": "sneaky edit"},
+             {"src/app.txt": "feature", "README.md": "original readme"}], retries=1)
+        self.assertEqual(task.status, "done")
+        self.assertEqual(len(calls), 2)
+        self.assertIn("README.md", calls[1])                       # the revision prompt names the stray file
+        self.assertIn("OUTSIDE this task's scope", lead.call_args_list[0].args[1])   # the lead was told
+        self.assertEqual(task.attempts[0]["result"], "revise")
+
+    def test_out_of_scope_edit_left_behind_fails_task_and_is_never_committed(self):
+        c, task, calls, _lead = self._run_with_worker_edits(
+            [{"src/app.txt": "feature", "README.md": "sneaky edit"}], retries=0)
+        self.assertEqual(task.status, "failed")
+        self.assertIn("README.md", task.review_note)
+        self.assertIn("NOT reviewed or checkpointed", task.review_note)
+        self.assertTrue(task.commit)                                # in-scope work was checkpointed...
+        in_checkpoint = subprocess.run(["git", "show", "--name-only", "--format=", "HEAD"], cwd=self.proj,
+                                       capture_output=True, text=True, check=True).stdout.split()
+        self.assertEqual(in_checkpoint, ["src/app.txt"])            # ...without the stray edit
+        self.assertEqual((self.proj / "README.md").read_text(encoding="utf-8"), "sneaky edit")  # not reverted
+        self.assertEqual(subprocess.run(["git", "show", "HEAD:README.md"], cwd=self.proj, capture_output=True,
+                                        text=True, check=True).stdout, "original readme")
 
     def test_plan_editor_updates_task_fields(self):
         c = self.make({"alpha": "good", "beta": "good"}, lead="alpha")
@@ -424,6 +536,21 @@ class TestConductorEndToEnd(unittest.TestCase):
         worktrees = subprocess.run(["git", "worktree", "list", "--porcelain"], cwd=self.proj,
                                    capture_output=True, text=True).stdout
         self.assertEqual(worktrees.count("worktree "), 1, worktrees)
+
+    def test_collect_workspace_changes_includes_code_diff(self):
+        self._repo_with_src()
+        c = self.make({"alpha": "good"}, lead="alpha", use_worktrees=True, jobs=1)
+        c.setup_git()
+        task = Task("t1", "Edit", "alpha", "edit", owns=["src"])
+        ws = c._task_workspace(task)
+        try:
+            (ws / "src" / "app.txt").write_text("updated body\n", encoding="utf-8")
+            files, diff, patch = c._collect_workspace_changes(ws, ["src"])
+            self.assertEqual(files, ["src/app.txt"])
+            self.assertIn("+updated body", diff)
+            self.assertTrue(patch)
+        finally:
+            c._remove_task_workspace(task)
 
     def test_broken_worker_is_replaced(self):
         c = self.make({"alpha": "good", "beta": "broken"}, lead="alpha", jobs=1)

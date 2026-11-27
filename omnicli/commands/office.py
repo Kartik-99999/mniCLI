@@ -1,7 +1,11 @@
 """Local animated office view for a live OmniCLI team run."""
 
 import argparse
+import hmac
 import json
+import os
+import re
+import secrets
 import sys
 import threading
 import webbrowser
@@ -9,6 +13,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlsplit
 
+from omnicli import paths
 from omnicli.commands import status
 
 NAMES = ["office"]
@@ -68,7 +73,58 @@ def add_parser(subparsers):
     parser.set_defaults(func=handler)
 
 
-def _handler_for(project_dir, fallback=None):
+KEY_HEADER = "X-OmniCLI-Key"
+
+
+def access_key():
+    """The secret the page must send to read run data. Kept in ~/.omnicli/office_key (owner-only), so the
+    link stays the same across sessions while other programs and users on this machine can't read the data."""
+    path = paths.omni_home() / "office_key"
+    try:
+        key = path.read_text(encoding="utf-8").strip()
+        if len(key) >= 32 and re.fullmatch(r"[A-Za-z0-9_-]+", key):
+            if path.stat().st_mode & 0o077:
+                os.chmod(str(path), 0o600)
+            return key
+    except OSError:
+        pass
+    key = secrets.token_urlsafe(32)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name("office_key.tmp")
+    fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        fh.write(key)
+    os.replace(str(tmp), str(path))
+    return key
+
+
+def page_url(port, key):
+    # the key rides in the #fragment: browsers never send it to any server, logs or Referer headers
+    return "http://127.0.0.1:{}/#key={}".format(port, key)
+
+
+_SECRET_RES = [
+    re.compile(r"\b(?:sk|pk|rk)-[A-Za-z0-9_-]{16,}"),
+    re.compile(r"\bgh[pousr]_[A-Za-z0-9]{20,}"),
+    re.compile(r"\bgithub_pat_[A-Za-z0-9_]{20,}"),
+    re.compile(r"\bAKIA[0-9A-Z]{16}\b"),
+    re.compile(r"\bxox[abprs]-[A-Za-z0-9-]{10,}"),
+    re.compile(r"\bAIza[0-9A-Za-z_-]{30,}"),
+    re.compile(r"\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}"),   # JWT
+]
+_SECRET_ASSIGN = re.compile(r"(?i)\b([\w.-]*(?:api[_-]?key|token|secret|passw(?:or)?d|credential)[\w.-]*)"
+                            r"(\s*[:=]\s*)(\"[^\"]*\"|'[^']*'|\S+)")
+
+
+def redact(text):
+    """Hide things that look like credentials in agent output shown on the page."""
+    text = str(text or "")
+    for rx in _SECRET_RES:
+        text = rx.sub("<redacted>", text)
+    return _SECRET_ASSIGN.sub(lambda m: m.group(1) + m.group(2) + "<redacted>", text)
+
+
+def _handler_for(project_dir, fallback=None, key=None):
     """project_dir may be a path or a zero-argument callable returning one (or None), so a long-lived
     server (the one chat starts) can follow the chat's current project. fallback(project) returns a
     snapshot to show when there is no team run yet (or None for the classic 503)."""
@@ -96,6 +152,11 @@ def _handler_for(project_dir, fallback=None):
                 payload = OFFICE_HTML.encode("utf-8")
                 content_type = "text/html; charset=utf-8"
                 code = 200
+            elif path == "/snapshot" and key is not None and not hmac.compare_digest(
+                    (self.headers.get(KEY_HEADER) or "").encode("utf-8"), key.encode("utf-8")):
+                payload = json.dumps({"error": "locked: open the link printed in your terminal"}).encode("utf-8")
+                content_type = "application/json; charset=utf-8"
+                code = 403
             elif path == "/snapshot":
                 project = current_project()
                 snapshot = read_snapshot(project) if project is not None else None
@@ -136,7 +197,11 @@ def read_snapshot(project_dir):
     state = status.runs.load_state(project_dir)
     if state is None:
         return None
-    return status.to_json(status.build_snapshot(project_dir, state))
+    snap = status.to_json(status.build_snapshot(project_dir, state))
+    for agent in snap.get("agents") or []:
+        if isinstance(agent, dict) and agent.get("latest_output"):
+            agent["latest_output"] = redact(agent["latest_output"])
+    return snap
 
 
 def idle_snapshot(project_dir, lead, workers):
@@ -154,13 +219,15 @@ def idle_snapshot(project_dir, lead, workers):
             "counts": {"done": 0, "failed": 0, "running": 0, "pending": 0, "total": 0}, "agents": agents}
 
 
-def start_background(project_dir, port=0, fallback=None):
-    """Start a daemon-thread office server and return (server, local URL)."""
-    server = ThreadingHTTPServer(("127.0.0.1", port), _handler_for(project_dir, fallback))
+def start_background(project_dir, port=0, fallback=None, key=None):
+    """Start a daemon-thread office server and return (server, local URL with the access key)."""
+    key = key or access_key()
+    server = ThreadingHTTPServer(("127.0.0.1", port), _handler_for(project_dir, fallback, key))
+    server.office_key = key
     server.daemon_threads = True
     thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.5}, daemon=True)
     thread.start()
-    return server, "http://127.0.0.1:{}/".format(server.server_address[1])
+    return server, page_url(server.server_address[1], key)
 
 
 DEFAULT_PORT = 8765
@@ -184,12 +251,13 @@ def handler(args):
         print(problem, file=sys.stderr)
         return 1
     try:
-        server = ThreadingHTTPServer(("127.0.0.1", args.port), _handler_for(project_dir))
+        key = access_key()
+        server = ThreadingHTTPServer(("127.0.0.1", args.port), _handler_for(project_dir, key=key))
     except OSError as ex:
         print("Office error: could not start local server: {}".format(ex), file=sys.stderr)
         return 1
     server.daemon_threads = True
-    url = "http://127.0.0.1:{}/".format(server.server_address[1])
+    url = page_url(server.server_address[1], key)
     print("OmniCLI Office: {}".format(url), flush=True)
     if not args.no_browser:
         webbrowser.open(url)

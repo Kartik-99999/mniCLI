@@ -49,21 +49,48 @@ class OfficeTests(unittest.TestCase):
         self.assertNotIn("http://", html.replace("http://www.w3.org/2000/svg", ""))
         self.assertEqual(html.lower().count("</script>"), html.lower().count("<script>"))
 
-    def test_server_refuses_foreign_host_headers(self):
+    def _fetch(self, port, key=None, host=None):
+        import urllib.error
         import urllib.request
+        headers = {}
+        if key is not None:
+            headers["X-OmniCLI-Key"] = key
+        if host is not None:
+            headers["Host"] = host
+        req = urllib.request.Request("http://127.0.0.1:{}/snapshot".format(port), headers=headers)
+        try:
+            with urllib.request.urlopen(req, timeout=5) as r:
+                return r.status
+        except urllib.error.HTTPError as ex:
+            return ex.code
+
+    def test_snapshot_requires_the_access_key_and_a_local_host(self):
         server, url = office.start_background(self.project, port=0)
         try:
-            with urllib.request.urlopen(url + "snapshot") as r:
-                self.assertEqual(r.status, 200)
             port = server.server_address[1]
-            req = urllib.request.Request("http://127.0.0.1:{}/snapshot".format(port),
-                                         headers={"Host": "evil.example:{}".format(port)})
-            with self.assertRaises(urllib.error.HTTPError) as cm:
-                urllib.request.urlopen(req)
-            self.assertEqual(cm.exception.code, 403)
+            key = url.split("#key=", 1)[1]
+            self.assertEqual(url, "http://127.0.0.1:{}/#key={}".format(port, key))
+            self.assertEqual(self._fetch(port, key), 200)
+            self.assertEqual(self._fetch(port), 403)                       # no key
+            self.assertEqual(self._fetch(port, "x" * 43), 403)             # wrong key
+            self.assertEqual(self._fetch(port, key, host="evil.example:{}".format(port)), 403)   # DNS rebinding
         finally:
             server.shutdown()
             server.server_close()
+
+    def test_access_key_is_stable_and_owner_only(self):
+        import stat
+        first, second = office.access_key(), office.access_key()
+        self.assertEqual(first, second)
+        self.assertGreaterEqual(len(first), 40)
+        mode = stat.S_IMODE((office.paths.omni_home() / "office_key").stat().st_mode)
+        self.assertEqual(mode & 0o077, 0)
+
+    def test_latest_output_is_redacted(self):
+        self.assertEqual(office.redact("using key sk-abcdefghijklmnopqrstuv now"), "using key <redacted> now")
+        self.assertEqual(office.redact("export OPENAI_API_KEY=abc123 && run"), "export OPENAI_API_KEY=<redacted> && run")
+        self.assertEqual(office.redact("token: ghp_abcdefghijklmnopqrstuvwxyz0123"), "token: <redacted>")
+        self.assertEqual(office.redact("editing src/app.py (3 tests pass)"), "editing src/app.py (3 tests pass)")
 
     def test_lead_shows_planning_and_final_check(self):
         state_file = self.project / ".omnicli" / "team" / "state.json"

@@ -402,10 +402,14 @@ class TestSession(ChatBase):
 class TestLiveOffice(ChatBase):
     """Chat starts the live office by itself and prints its local link."""
 
-    def _get(self, url):
+    def _get(self, page_url):
+        """GET /snapshot the way the page does: key from the link's #fragment, sent as a header."""
         import json
         import urllib.request
-        with urllib.request.urlopen(url, timeout=5) as r:
+        base, _, frag = page_url.partition("#")
+        key = frag.partition("key=")[2]
+        req = urllib.request.Request(base + "snapshot", headers={"X-OmniCLI-Key": key})
+        with urllib.request.urlopen(req, timeout=5) as r:
             return r.status, json.loads(r.read().decode("utf-8"))
 
     def test_chat_starts_office_shows_link_and_follows_project(self):
@@ -419,7 +423,7 @@ class TestLiveOffice(ChatBase):
             real_welcome()
             seen["url"] = s.office_url
             # no run yet: the team is shown at rest instead of an error
-            code, snap = self._get(s.office_url + "snapshot")
+            code, snap = self._get(s.office_url)
             seen["idle"] = (code, snap["phase"], [a["id"] for a in snap["agents"]])
             # the chat moves to a project with a run: the same link now shows that run
             second = Path(tempfile.mkdtemp(prefix="omni-chat-office-run-"))
@@ -428,12 +432,13 @@ class TestLiveOffice(ChatBase):
                 "version": 1, "goal": "g", "phase": "running", "pid": os.getpid(), "lead": "brain",
                 "workers": ["brain"], "tasks": []}))
             s.project = second
-            code, snap = self._get(s.office_url + "snapshot")
+            code, snap = self._get(s.office_url)
             seen["run"] = (code, snap["phase"])
 
         s.welcome = welcome_and_probe
         self.assertEqual(s.loop(), 0)
         self.assertTrue(seen["url"].startswith("http://127.0.0.1:"))
+        self.assertIn("/#key=", seen["url"])                     # the printed link carries the access key
         self.assertIn("Live office", self.text())
         self.assertIn(seen["url"], self.text())
         self.assertEqual(seen["idle"], (200, "idle", ["brain"]))
@@ -467,6 +472,11 @@ class TestLiveOffice(ChatBase):
             self.assertEqual(init.call_args.kwargs["office_mode"], "open")
             chat.run(argparse.Namespace(dir=None, lead=None))
             self.assertEqual(init.call_args.kwargs["office_mode"], "on")   # default
+
+    def test_parse_reply_handles_markdown_bold_action(self):
+        reply, action = chat.parse_reply('Sure.\n**ACTION:** `{"type": "command", "args": ["status"]}`')
+        self.assertEqual(reply, "Sure.")
+        self.assertEqual(action, {"type": "command", "args": ["status"]})
 
 
 if __name__ == "__main__":

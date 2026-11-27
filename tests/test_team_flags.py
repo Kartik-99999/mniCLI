@@ -91,10 +91,17 @@ class TestBuildCommandOptions(unittest.TestCase):
         s = self.spec("claude", _model="opus", _effort="high", _add_dirs=["/data/a", "/data/b"])
         cmd = ag.build_command(s, "edit", "do it", "/p")
         self.assertEqual(cmd[1:3], ["-p", "do it"])
+        self.assertIn("--permission-mode", cmd)
+        self.assertEqual(cmd[cmd.index("--permission-mode") + 1], "acceptEdits")
+        self.assertEqual(cmd[cmd.index("--permission-prompts") + 1], "none")
         self.assertEqual(cmd[-8:], ["--model", "opus", "--effort", "high",
                                     "--add-dir", "/data/a", "--add-dir", "/data/b"])
         lead = ag.build_command(s, "readonly", "plan it", "/p")
-        self.assertEqual(lead[1:], ["-p", "plan it", "--model", "opus", "--effort", "high"])  # no add-dir for the lead
+        self.assertEqual(
+            lead[1:],
+            ["-p", "plan it", "--permission-mode", "plan", "--permission-prompts", "none",
+             "--model", "opus", "--effort", "high"],
+        )  # read-only enforced, no add-dir for the lead
 
     def test_codex_options_go_before_the_positional_prompt(self):
         s = self.spec("codex", _model="gpt-5", _effort="high", _add_dirs=["/data"])
@@ -102,6 +109,8 @@ class TestBuildCommandOptions(unittest.TestCase):
         with mock.patch.object(model_catalog, "cached_effort_levels", return_value=["low", "high"]):
             cmd = ag.build_command(s, "edit", "PROMPT", "/p")
         self.assertEqual(cmd[-1], "PROMPT")
+        self.assertEqual(cmd[1:3], ["-a", "never"])
+        self.assertIn("--color", cmd)
         self.assertIn("-m", cmd)
         self.assertEqual(cmd[cmd.index("-m") + 1], "gpt-5")
         self.assertIn('model_reasoning_effort="high"', cmd)
@@ -109,17 +118,24 @@ class TestBuildCommandOptions(unittest.TestCase):
         self.assertLess(cmd.index("-C"), cmd.index("-m"))  # still after `exec ... -C /p`
 
     def test_agy_and_muse(self):
-        self.assertEqual(ag.BUILTIN_AGENTS["agy"]["effort_levels"], ["low", "medium", "high"])
+        self.assertEqual(ag.BUILTIN_AGENTS["agy"]["effort_levels"], ["low", "medium", "high", "xhigh", "max"])
         agy = ag.build_command(self.spec("agy", _model="m1", _effort="high", _add_dirs=["/x"]), "edit", "P", "/p")
         self.assertEqual(agy[-6:], ["--model", "m1", "--effort", "high", "--add-dir", "/x"])
-        for unsupported in ("xhigh", "max"):
-            stale = self.spec("agy", _model="m1", _effort=unsupported, _add_dirs=["/x"])
-            self.assertNotIn("--effort", ag.build_command(stale, "edit", "P", "/p"))
-            self.assertNotIn("--effort", ag.build_command(stale, "edit", "P", "/p", effort=unsupported))
+        # agy cannot see images headlessly, so image attachments must not grant --add-dir
+        self.assertEqual(ag.option_args(self.spec("agy"), "readonly", images=["/tmp/shot.png"]), [])
+        for supported in ("xhigh", "max"):
+            configured = self.spec("agy", _model="m1", _effort=supported, _add_dirs=["/x"])
+            command = ag.build_command(configured, "edit", "P", "/p")
+            self.assertEqual(command[command.index("--effort") + 1], supported)
+        unsupported = self.spec("agy", _model="m1", _effort="ultra", _add_dirs=["/x"])
+        self.assertNotIn("--effort", ag.build_command(unsupported, "edit", "P", "/p"))
+        self.assertNotIn("--effort", ag.build_command(unsupported, "edit", "P", "/p", effort="ultra"))
         fixed_tier = ag.with_options(self.spec("agy"), model="gemini-3.8-flash-high", effort="max")
         self.assertNotIn("_effort", fixed_tier)
         self.assertEqual(ag.effort_levels(self.spec("agy"), "gemini-3.8-flash-high"), ["high"])
         muse = ag.build_command(self.spec("muse", _model="m2", _effort="low", _add_dirs=["/x"]), "edit", "P", "/p")
+        self.assertEqual(muse[muse.index("--approval-mode") + 1], "never")
+        self.assertIn("--disable-request-user-input", muse)
         self.assertEqual(muse[-5:], ["--model", "m2", "--reasoning-effort", "low", "P"])
         self.assertNotIn("--add-dir", muse)  # muse exec has no --add-dir equivalent
 

@@ -189,7 +189,7 @@
     var agents = (data.agents || []).map(function (a) {
       var p = a.progress || {}, rv = a.reviewing_task || null;
       var task = (a.current_tasks && a.current_tasks[0]) || null;
-      if (!task && rv) task = { id: rv.task_id, title: rv.title || "" };
+      if (!task && rv) task = { id: rv.task_id, title: rv.task_title || rv.title || "" };
       return {
         id: a.id, role: a.role || "worker", pose: poseFor(a, run), status: a.status || "",
         target: rv && rv.builder && rv.builder !== a.id ? rv.builder : null,
@@ -303,13 +303,24 @@
       text("refresh", "Demo · step " + (((demoStep - 1) % DEMO.length) + 1) + "/" + DEMO.length);
       return;
     }
-    fetch("/snapshot", { cache: "no-store" }).then(function (r) {
+    // the access key is in the link's #fragment (never sent to servers); the data endpoint requires it
+    var key = (location.hash.match(/(?:^#|&)key=([A-Za-z0-9_-]+)/) || [])[1] || "";
+    fetch("/snapshot", { cache: "no-store", headers: { "X-OmniCLI-Key": key } }).then(function (r) {
+      if (r.status === 403) throw new Error("locked");
       if (!r.ok) throw new Error("Run state unavailable");
       return r.json();
     }).then(function (data) {
       render(OO.deriveModel(data));
       text("refresh", "Updated " + new Date().toLocaleTimeString());
-    }).catch(function () { text("refresh", "Connection issue · retrying"); });
+    }).catch(function (e) {
+      if (e && e.message === "locked") {
+        text("phase", "● LOCKED");
+        text("project", "Open the office link printed in your terminal (it carries this view's access key).");
+        text("refresh", "Locked");
+      } else {
+        text("refresh", "Connection issue · retrying");
+      }
+    });
   }
 
   OO.start = function () {

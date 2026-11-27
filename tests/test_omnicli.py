@@ -9,6 +9,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
+os.environ.setdefault("OMNICLI_HOME", tempfile.mkdtemp(prefix="omnicli-test-home-"))
+
 from omnicli.context import ExecutionContext
 from omnicli.engine import ExecutionEngine
 from omnicli.models import CliCategory, CliTool, Pipeline, Step, StepResult

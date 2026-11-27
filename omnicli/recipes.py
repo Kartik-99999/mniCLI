@@ -7,9 +7,10 @@ import json
 from pathlib import Path
 from typing import Dict, List, Optional
 
+from omnicli import paths
 from omnicli.models import Pipeline, Step
 
-USER_RECIPES_DIR = Path.home() / ".omnicli" / "recipes"
+USER_RECIPES_DIR = paths.omni_home() / "recipes"
 PACKAGE_ROOT = Path(__file__).resolve().parent.parent
 
 
@@ -186,7 +187,7 @@ class RecipeManager:
     """Loads, saves, and lists recipes."""
 
     def __init__(self, user_dir: Optional[Path] = None):
-        self.user_dir = user_dir or USER_RECIPES_DIR
+        self.user_dir = user_dir or (paths.omni_home() / "recipes")
         self.user_dir.mkdir(parents=True, exist_ok=True)
 
     def list_recipes(self) -> List[Dict[str, str]]:

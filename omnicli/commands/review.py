@@ -165,7 +165,7 @@ def pick_reviewer(specs: Dict[str, Dict], health: Dict[str, Dict], order: List[s
         return None, (f"'{wanted}' cannot review right now ({why}). Log in to it, check with "
                       f"`omnicli agents --check`, or pick another reviewer with --lead.")
     if not ready:
-        return None, ("no AI CLI is ready to review. Log in to at least one (e.g. `claude`, `codex login`, `agy`) "
+        return None, ("no AI CLI is ready to review. Log in to at least one (e.g. `claude`, `codex login`, `agy`, `muse login`) "
                       "and check with `omnicli agents --check`.")
     return ready[0], ""
 

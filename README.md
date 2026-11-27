@@ -6,7 +6,7 @@ OmniCLI brings AI coding CLIs together to plan, build, verify, and review a proj
 
 OmniCLI is tested on macOS with Python 3.9. Linux should work, but is not yet verified. Windows is not supported because process management uses Unix process groups.
 
-Tested AI CLI versions: Claude 2.1.325, Codex CLI 0.169.0, agy 1.5.9, and Muse 1.4.20.
+Tested AI CLI versions: Claude 2.1.332, Codex CLI 0.172.0, agy 1.5.18, and Muse 1.4.24.
 
 <!-- Add a screenshot or GIF here. -->
 
@@ -89,8 +89,11 @@ omnicli pr --dir ./todo-app --base main --draft
 their work) or **Cricket** (batting = working, bowling = checking work, non-striker = waiting, dugout = free).
 Add `#demo` to the address to preview every state. Press Ctrl-C in the terminal to stop the server.
 
-**Chat starts the office for you.** When you open `omnicli` (chat mode), the banner shows a local link such as
-`Live office http://127.0.0.1:8765/`. Open it once and keep it open: it follows whatever project the chat is
+**Chat starts the office for you.** When you open `omnicli` (chat mode), the banner shows a private local link such as
+`Live office http://127.0.0.1:8765/#key=…`. The key (kept in `~/.omnicli/office_key`, readable only by you) stops
+other programs and users on your computer from reading your run; it stays the same, so you can bookmark the link.
+Agent output shown on the page has anything that looks like an API key or token hidden.
+Open it once and keep it open: it follows whatever project the chat is
 working on. Before a run it shows your team at rest; when you ask for something, the team gets to work live.
 Type `/office` to open it in your browser, or `/office 1` to view a saved run. It stops when you leave the chat.
 Change this with `omnicli config set office open` (also opens the browser), `omnicli config set office off`
@@ -148,7 +151,7 @@ How it behaves:
 - **Checkpoints** – each finished task is a git commit (`t2: Backend API [muse]`), so you can inspect or revert any
   agent's work. Logs and state live in `<project>/.omnicli/team/` (git-excluded); the final `REPORT.md` is there too.
 - **Safe by default** – workers use each CLI's own safe auto-edit mode (Claude `acceptEdits` + an allow-list of
-  build/test commands without `pip`/`rm`/`curl`, Codex `workspace-write` sandbox, Antigravity `accept-edits --sandbox`
+  build/test commands without `pip`/`rm`/`curl`, Codex `workspace-write` sandbox, Antigravity `--mode auto --sandbox`
   with the same command allow-list passed via its session-only `--settings`,
   Muse's default sandbox). Nothing disables an agent's permission system. Workers are told never to install anything
   outside the project. Note that Muse's default sandbox *does* allow network access to package indexes, so for Muse that

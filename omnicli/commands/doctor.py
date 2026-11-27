@@ -51,6 +51,8 @@ CHECK_NOTICE = ("Pinging each installed AI CLI with one tiny prompt (\"reply PON
 LOGIN_HINTS = {
     "claude": "run `claude` and log in with /login",
     "codex": "run `codex login`",
+    "agy": "run `agy` once and log in",
+    "muse": "run `muse login`",
 }
 _AUTH_WORDS = ("not logged in", "auth", "login", "log in", "logged in", "sign in", "unauthorized", "401",
                "api key", "token")

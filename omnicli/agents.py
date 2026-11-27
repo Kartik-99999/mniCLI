@@ -66,29 +66,45 @@ HEALTH_TTL_SEC = 6 * 3600
 # A nested `claude` refuses to start if these leak in from a parent Claude Code session.
 _STRIP_ENV = ("CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT")
 
-# Commands a worker may run without a prompt: build/test tooling only (no rm, curl,
-# git push, pip install, ...). Headless agents cannot ask for permission, so anything
-# outside this list is auto-denied. Override per agent via ~/.omnicli/agents.json.
+# Common build, test, and inspection commands made available to workers (no rm, curl,
+# git push, pip install, ...). Adapters may further restrict these; in headless mode,
+# actions outside the active CLI's policy can be auto-denied. Override per agent via
+# ~/.omnicli/agents.json.
 WORKER_DEV_COMMANDS = [
-    "npm", "npx", "node", "pnpm", "yarn", "bun", "tsc", "vite", "vitest",
-    "python3", "python", "pytest", "ruff",
-    "go", "cargo", "make", "ls", "cat", "mkdir", "touch",
+    "npm", "npx", "node", "pnpm", "yarn", "bun", "tsc", "tsx", "vite", "vitest",
+    "jest", "mocha", "eslint", "prettier",
+    "python3", "python", "pytest", "ruff", "mypy", "black", "flake8", "uv", "poetry",
+    "go", "cargo", "rustc", "deno", "swift", "dotnet", "mvn", "gradle", "make",
+    "ls", "cat", "mkdir", "touch", "stat", "file", "basename", "dirname",
     # read-only inspection agents use constantly (not find: it has -delete/-exec)
     "grep", "head", "tail", "wc", "pwd", "echo", "which", "sort", "diff", "tree",
+    "uniq", "cmp", "cut", "tr", "printf", "test", "true", "false",
 ]
 CLAUDE_WORKER_TOOLS = ",".join(
     [f"Bash({c}:*)" for c in WORKER_DEV_COMMANDS]
-    + ["Bash(git status:*)", "Bash(git diff:*)", "Bash(git log:*)"]
+    + [
+        "Bash(git status:*)", "Bash(git diff:*)", "Bash(git log:*)",
+        "Bash(git show:*)", "Bash(git rev-parse:*)", "Bash(git ls-files:*)",
+        "Bash(rg:*)", "Bash(sed -n:*)",
+    ]
 )
-# Antigravity takes session-only settings; command(<cmd>) allow-rules (verified with agy 1.5.9).
-AGY_WORKER_SETTINGS = json.dumps({"permissions": {"allow": [f"command({c})" for c in WORKER_DEV_COMMANDS]}})
+# Antigravity takes session-only settings; command(<cmd>) allow-rules (verified with agy 1.5.18).
+# Headless workers also need these common read-only commands to inspect a workspace.
+AGY_READONLY_COMMANDS = [
+    "git status", "git diff", "git log", "git show", "git rev-parse", "git ls-files", "git branch",
+    "rg", "sed -n",
+]
+AGY_WORKER_SETTINGS = json.dumps({"permissions": {"allow": [
+    *[f"command({c})" for c in WORKER_DEV_COMMANDS],
+    *[f"command({c})" for c in AGY_READONLY_COMMANDS],
+]}})
 
 PREFERRED_LEAD_ORDER = ["claude", "codex", "agy", "muse"]
 
-# model/effort/add-dir flags below were each checked against the CLI's own --help on
-# 2026-11-15: claude 2.1.325, codex-cli 0.163.0 (`codex exec --help`), agy 1.5.9,
-# muse 1.4.20 (`muse exec --help`). (Google discontinued Gemini CLI; Gemini models remain
-# available through Antigravity - see `agy models`.)
+# model/effort/add-dir/permission flags below were each checked against the CLI's own --help on
+# 2026-11-27: claude 2.1.332 (`claude --help`), codex-cli 0.172.0 (`codex --help` / `codex exec --help`),
+# agy 1.5.18 (`agy --help`), muse 1.4.24 (`muse exec --help`).
+# (Google discontinued Gemini CLI; Gemini models remain available through Antigravity - see `agy models`.)
 BUILTIN_AGENTS: Dict[str, Dict] = {
     "claude": {
         "name": "Claude Code",
@@ -97,8 +113,11 @@ BUILTIN_AGENTS: Dict[str, Dict] = {
         "sees_images": True,
         "bin": "claude",
         "strengths": "architecture, complex multi-file features, refactoring, debugging, careful reviews",
-        "readonly": ["-p", "{prompt}"],
-        "edit": ["-p", "{prompt}", "--permission-mode", "acceptEdits", "--allowedTools", CLAUDE_WORKER_TOOLS],
+        "readonly": ["-p", "{prompt}", "--permission-mode", "plan", "--permission-prompts", "none"],
+        "edit": [
+            "-p", "{prompt}", "--permission-mode", "acceptEdits", "--permission-prompts", "none",
+            "--allowedTools", CLAUDE_WORKER_TOOLS,
+        ],
         "model_args": ["--model", "{model}"],
         "effort_args": ["--effort", "{effort}"],
         "effort_levels": ["low", "medium", "high", "xhigh", "max"],
@@ -109,12 +128,18 @@ BUILTIN_AGENTS: Dict[str, Dict] = {
         "vendor": "openai",
         "bin": "codex",
         "strengths": "backend logic, algorithms, precise code edits, writing and fixing tests",
-        "readonly": ["exec", "--skip-git-repo-check", "-s", "read-only", "-C", "{dir}", "{prompt}"],
-        "edit": ["exec", "--skip-git-repo-check", "-s", "workspace-write", "-C", "{dir}", "{prompt}"],
+        "readonly": [
+            "-a", "never", "exec", "--skip-git-repo-check", "-s", "read-only",
+            "--color", "never", "-C", "{dir}", "{prompt}",
+        ],
+        "edit": [
+            "-a", "never", "exec", "--skip-git-repo-check", "-s", "workspace-write",
+            "--color", "never", "-C", "{dir}", "{prompt}",
+        ],
         "model_args": ["-m", "{model}"],
         # `-c key=value` overrides ~/.codex/config.toml; model_reasoning_effort is a codex config key
         "effort_args": ["-c", 'model_reasoning_effort="{effort}"'],
-        # levels from `codex debug models` -> supported_reasoning_levels (union over listed models, 2026-11-15)
+        # levels from `codex debug models` -> supported_reasoning_levels (union over listed models, 2026-11-27)
         "effort_levels": ["low", "medium", "high", "xhigh", "max", "ultra"],
         "add_dir_args": ["--add-dir", "{add_dir}"],
         "options_before_prompt": True,
@@ -128,11 +153,13 @@ BUILTIN_AGENTS: Dict[str, Dict] = {
         "bin": "agy",
         "strengths": "full-stack and web UI work, frontend pages, end-to-end feature wiring",
         "readonly": ["-p", "{prompt}", "--mode", "plan"],
-        "edit": ["-p", "{prompt}", "--mode", "accept-edits", "--sandbox", "--settings", AGY_WORKER_SETTINGS],
+        # AGY 1.5.18 `--help`: auto approves safe sandboxed actions in headless runs;
+        # keep the terminal sandbox and explicit session command allow-list enabled.
+        "edit": ["-p", "{prompt}", "--mode", "auto", "--sandbox", "--settings", AGY_WORKER_SETTINGS],
         "model_args": ["--model", "{model}"],
         "effort_args": ["--effort", "{effort}"],
-        # Antigravity CLI 1.5.11's /model selector offers only low, medium, and high.
-        "effort_levels": ["low", "medium", "high"],
+        # AGY 1.5.18 `--help`; model slugs that end in a tier are narrowed by effort_levels().
+        "effort_levels": ["low", "medium", "high", "xhigh", "max"],
         "add_dir_args": ["--add-dir", "{add_dir}"],
     },
     "muse": {
@@ -140,8 +167,14 @@ BUILTIN_AGENTS: Dict[str, Dict] = {
         "vendor": "muse",
         "bin": "muse",
         "strengths": "terminal coding, scripts and tooling, docs, tests, project scaffolding",
-        "readonly": ["exec", "--workspace", "{dir}", "--disable-write", "--disable-shell", "{prompt}"],
-        "edit": ["exec", "--workspace", "{dir}", "{prompt}"],
+        "readonly": [
+            "exec", "--workspace", "{dir}", "--disable-write", "--disable-shell",
+            "--disable-request-user-input", "{prompt}",
+        ],
+        "edit": [
+            "exec", "--workspace", "{dir}", "--approval-mode", "never",
+            "--disable-request-user-input", "{prompt}",
+        ],
         "model_args": ["--model", "{model}"],
         "effort_args": ["--reasoning-effort", "{effort}"],
         "effort_levels": ["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"],
@@ -153,32 +186,57 @@ BUILTIN_AGENTS: Dict[str, Dict] = {
     },
 }
 
-_AUTH_HINTS = ("unauthorized", "401", "log in", "login", "logged in", "sign in", "refresh token", "api key", "authenticat")
+_AUTH_HINTS = (
+    "unauthorized", "401", "log in", "login", "logged in", "sign in", "refresh token",
+    "api key", "invalid_api_key", "authenticat", "token expired",
+)
 # Plan/usage caps (e.g. claude: "You've hit your 5-hour limit · resets 2:20am"). Only checked on a FAILED
 # run, and only in its last lines, so a worker that merely writes "rate limit" in code isn't affected.
 _QUOTA_PATTERNS = [re.compile(p, re.I) for p in (
-    r"hit your [\w\- ]*limit", r"usage limit", r"limit (has been )?reached", r"quota (exceeded|exhausted)",
-    r"exceeded your (current )?quota", r"rate.?limit(ed)?\b", r"too many requests", r"\b429\b",
-    r"out of (credits|tokens)", r"insufficient (credits|quota|balance)",
+    r"hit your [\w\- ]*limit", r"usage[_\s]+limit", r"limit (has been )?reached", r"quota (exceeded|exhausted)",
+    r"exceeded your (current )?quota", r"rate[_\s.\-]?limit(?:ed|ing)?\b", r"too many requests", r"\b429\b",
+    r"\b402\b", r"out of (credits|tokens)", r"insufficient (credits|quota|balance)",
+    r"credit balance is too low", r"(?:5-hour|hourly|daily|weekly|monthly) limit",
 )]
 _RESET_TIME = re.compile(r"\breset(?:s|ting)?(?:\s+(?:at|around))?\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)\b", re.I)
+_RESET_TIME_24H = re.compile(r"\breset(?:s|ting)?(?:\s+(?:at|around))?\s+([01]?\d|2[0-3]):([0-5]\d)\b(?!\s*(?:am|pm))", re.I)
+_RESET_RELATIVE = re.compile(
+    r"\b(?:reset(?:s|ting)?|try again|retry(?:\s+after)?)\s+(?:in\s+)?"
+    r"(?:(\d+)\s*(?:h|hr|hrs|hour|hours)\s*)?(?:(\d+)\s*(?:m|min|mins|minute|minutes)\s*)?(?:(\d+)\s*(?:s|sec|secs|second|seconds))?\b",
+    re.I,
+)
 
 
 def parse_quota_reset(text: str, now: Optional[float] = None) -> Optional[float]:
-    """Parse local clock reset notices such as 'resets 2:20am' into an epoch time."""
-    match = _RESET_TIME.search(str(text or ""))
-    if not match:
+    """Parse local clock reset notices such as 'resets 2:20am', 'resets at 14:30', or 'try again in 15m'."""
+    raw = str(text or "")
+    ref_now = now if now is not None else time.time()
+    match = _RESET_TIME.search(raw)
+    if match:
+        hour, minute = int(match.group(1)), int(match.group(2) or 0)
+        meridiem = match.group(3).lower()
+        if 1 <= hour <= 12 and minute <= 59:
+            hour = hour % 12 + (12 if meridiem == "pm" else 0)
+            current = datetime.datetime.fromtimestamp(ref_now).astimezone()
+            target = current.replace(hour=hour, minute=minute, second=0, microsecond=0)
+            if target.timestamp() <= ref_now:
+                target += datetime.timedelta(days=1)
+            return target.timestamp()
         return None
-    hour, minute = int(match.group(1)), int(match.group(2) or 0)
-    meridiem = match.group(3).lower()
-    if hour < 1 or hour > 12 or minute > 59:
-        return None
-    hour = hour % 12 + (12 if meridiem == "pm" else 0)
-    current = datetime.datetime.fromtimestamp(now if now is not None else time.time()).astimezone()
-    target = current.replace(hour=hour, minute=minute, second=0, microsecond=0)
-    if target.timestamp() <= (now if now is not None else time.time()):
-        target += datetime.timedelta(days=1)
-    return target.timestamp()
+    match24 = _RESET_TIME_24H.search(raw)
+    if match24:
+        hour, minute = int(match24.group(1)), int(match24.group(2))
+        current = datetime.datetime.fromtimestamp(ref_now).astimezone()
+        target = current.replace(hour=hour, minute=minute, second=0, microsecond=0)
+        if target.timestamp() <= ref_now:
+            target += datetime.timedelta(days=1)
+        return target.timestamp()
+    rel = _RESET_RELATIVE.search(raw)
+    if rel and any(rel.groups()):
+        delta = (int(rel.group(1) or 0) * 3600) + (int(rel.group(2) or 0) * 60) + int(rel.group(3) or 0)
+        if delta > 0:
+            return ref_now + delta
+    return None
 
 
 def load_agent_specs(config_path: Optional[Path] = None) -> Dict[str, Dict]:
@@ -301,7 +359,7 @@ def option_args(spec: Dict, mode: str, model: Optional[str] = None, effort: Opti
         if spec.get("image_args"):          # the CLI attaches images natively (codex, muse)
             for img in images:
                 out += [str(a).replace("{image}", str(img)) for a in spec["image_args"]]
-        elif spec.get("add_dir_args"):      # otherwise let it open the files: grant their folder
+        elif spec.get("add_dir_args") and spec.get("sees_images"):      # otherwise let it open the files: grant their folder
             for d in dict.fromkeys(str(Path(i).parent) for i in images):
                 out += [str(a).replace("{add_dir}", d) for a in spec["add_dir_args"]]
     return out
@@ -462,8 +520,10 @@ class AgentRun:
             return "not logged in / auth expired"
         if self.silent:
             note = [l for l in self.stderr.strip().splitlines() if l.strip()]
-            if note and "auto-denied" in note[-1]:
-                return "produced no output: a tool it needed was auto-denied in headless mode"
+            denial = next((line for line in reversed(note) if "auto-denied" in line.lower()), "")
+            if denial:
+                reason = "produced no output: a tool it needed was auto-denied in headless mode"
+                return reason + ": " + denial.strip()[:180]
             return "produced no output" + (f": {note[-1][:160]}" if note else "")
         tail = [l for l in (self.stderr or self.output).strip().splitlines() if l.strip()]
         last = tail[-1][:160] if tail else ""
@@ -619,7 +679,13 @@ PING_PROMPT = "Reply with exactly the single word PONG and nothing else."
 
 
 def _ping(spec: Dict, workdir: str, timeout: float) -> Tuple[bool, str]:
-    run = run_agent(spec, PING_PROMPT, "readonly", workdir, timeout=timeout, meta={"kind": "ping"})
+    ping_spec = spec
+    model = spec.get("_model")
+    if (spec.get("effort_args") and not spec.get("_effort")
+            and (str(spec.get("id") or "").lower() != "agy" or model)
+            and effort_supported(spec, model, "low")):
+        ping_spec = with_options(spec, model=model, effort="low")
+    run = run_agent(ping_spec, PING_PROMPT, "readonly", workdir, timeout=timeout, meta={"kind": "ping"})
     if run.ok and "pong" in run.output.lower():
         return True, f"ok ({run.duration:.0f}s)"
     if run.ok:
@@ -712,13 +778,18 @@ def extract_json(text: str, required_key: Optional[str] = None) -> Optional[Dict
 
     decoder = json.JSONDecoder()
     for cand in candidates:
+        last_match = None
         idx = cand.find("{")
         while idx != -1:
             try:
-                obj, _ = decoder.raw_decode(cand[idx:])
+                obj, end = decoder.raw_decode(cand[idx:])
                 if isinstance(obj, dict) and (required_key is None or required_key in obj):
-                    return obj
+                    last_match = obj
+                    idx = cand.find("{", idx + end)
+                    continue
             except ValueError:
                 pass
             idx = cand.find("{", idx + 1)
+        if last_match is not None:
+            return last_match
     return None

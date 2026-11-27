@@ -117,6 +117,32 @@ def _muse_catalog(binary: str, spec: Dict, runner: Optional[Callable] = None) ->
     return None
 
 
+def _parse_effort_levels(raw) -> Optional[List[str]]:
+    """Normalize CLI reasoning-effort lists (either plain strings or {effort, ...} dicts)."""
+    if not isinstance(raw, list):
+        return None
+    levels: List[str] = []
+    for item in raw:
+        val = item.get("effort") or item.get("tier") if isinstance(item, dict) else item
+        if isinstance(val, str):
+            text = val.strip()
+            if text and text not in levels:
+                levels.append(text)
+    return levels
+
+
+def _bin_sig(binary: Optional[str]) -> str:
+    """Cheap file signature for invalidating model caches when a CLI binary upgrades."""
+    if not binary:
+        return ""
+    try:
+        real = os.path.realpath(binary)
+        st = os.stat(real)
+        return f"{real}:{st.st_mtime_ns}:{st.st_size}"
+    except OSError:
+        return ""
+
+
 def _muse_model_rows(catalog: Optional[Dict]) -> List[Dict]:
     """Normalize Muse model/list rows for the shared picker and effort selector."""
     rows = []
@@ -128,12 +154,18 @@ def _muse_model_rows(catalog: Optional[Dict]) -> List[Dict]:
             continue
         label = str(row.get("displayLabel") or model_id).strip()
         provider = str(row.get("providerId") or "").strip()
+        eff = str(row.get("defaultReasoningEffort") or "").strip()
+        meta = []
         if provider:
-            label += " ({})".format(provider)
+            meta.append(provider)
+        if eff:
+            meta.append(f"default effort {eff}")
+        if meta:
+            label += " ({})".format(", ".join(meta))
         item = {"id": model_id, "name": label}
-        variants = row.get("variants")
-        if isinstance(variants, list):
-            item["effort_levels"] = [str(level) for level in variants if isinstance(level, str)]
+        levels = _parse_effort_levels(row.get("variants"))
+        if levels is not None:
+            item["effort_levels"] = levels
         if row.get("isDefault"):
             item["default"] = True
         rows.append(item)
@@ -143,19 +175,29 @@ def _muse_model_rows(catalog: Optional[Dict]) -> List[Dict]:
 def discover(name: str, spec: Dict, refresh: bool = False, runner: Optional[Callable] = None) -> Dict:
     """{"models": [{"id", "name"}], "cli_default": str|None, "source": str, "free_text": bool, "note": str}"""
     run = runner or _run
+    from omnicli.agents import resolve_bin
+    binary = resolve_bin(spec)
+    bin_sig = _bin_sig(binary)
     cache = _load_cache()
     hit = cache.get(name)
     if not refresh and hit and time.time() - hit.get("at", 0) < CACHE_TTL_SEC and runner is None:
-        stale_muse_cache = name == "muse" and hit.get("data", {}).get("source") != "muse serve model/list"
-        # Older builds silently discarded object-form Codex tiers.
-        stale_codex_cache = name == "codex" and hit.get("tier_format") != 2
-        if not stale_muse_cache and not stale_codex_cache:
-            return hit["data"]
+        hit_data = hit.get("data") or {}
+        hit_models = hit_data.get("models") or []
+        stale_muse_cache = name == "muse" and hit_data.get("source") != "muse serve model/list"
+        # Older builds discarded object-form Codex tiers or lacked binary-signature metadata.
+        stale_codex_cache = name == "codex" and (
+            hit.get("tier_format") != 2
+            or (
+                hit_data.get("source") == "codex debug models"
+                and any(isinstance(row, dict) and "effort_levels" not in row for row in hit_models)
+            )
+        )
+        stale_bin_cache = bool(bin_sig and hit.get("bin_sig") and hit.get("bin_sig") != bin_sig)
+        if not stale_muse_cache and not stale_codex_cache and not stale_bin_cache:
+            return hit_data
 
-    from omnicli.agents import resolve_bin
     data = {"models": [], "cli_default": None, "source": "", "free_text": True, "note": ""}
     cacheable = True
-    binary = resolve_bin(spec)
     if not spec.get("model_args"):
         data.update(source="-", free_text=False, note="this CLI has no supported model flag")
     elif not binary:
@@ -175,10 +217,9 @@ def discover(name: str, spec: Dict, refresh: bool = False, runner: Optional[Call
                     eff = m.get("default_reasoning_level")
                     row = {"id": m["slug"], "name": (m.get("display_name") or m["slug"])
                            + (f" (default effort {eff})" if eff else "")}
-                    levels = m.get("supported_reasoning_levels")
-                    if isinstance(levels, list):
-                        values = [level.get("effort") if isinstance(level, dict) else level for level in levels]
-                        row["effort_levels"] = list(dict.fromkeys(v for v in values if isinstance(v, str) and v))
+                    levels = _parse_effort_levels(m.get("supported_reasoning_levels"))
+                    if levels is not None:
+                        row["effort_levels"] = levels
                     data["models"].append(row)
         except ValueError:
             pass
@@ -203,7 +244,7 @@ def discover(name: str, spec: Dict, refresh: bool = False, runner: Optional[Call
         data.update(source="-", note="no model list for this CLI; type a model name")
 
     if runner is None and cacheable:
-        cache[name] = {"at": time.time(), "data": data}
+        cache[name] = {"at": time.time(), "bin_sig": bin_sig, "data": data}
         if name == "codex":
             cache[name]["tier_format"] = 2
         _save_cache(cache)

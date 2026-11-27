@@ -8,7 +8,7 @@ task's verify command → the lead reviews (approve / revise) → git checkpoint
 ## Hard rules
 - **Python 3.9 standard library only.** The system `/usr/bin/python3` is 3.9.6: no `X | Y` unions at
   runtime, no `match`, no 3.10+ APIs. No third-party dependencies (that is a feature of the project).
-- **Run the full suite after every change** (currently 464 tests, all must pass):
+- **Run the full suite after every change** (currently 542 tests, all must pass):
   `PYTHONPATH=. python3 -m unittest discover -s tests -p "test_*.py"`
 - **Tests never touch the real `~/.omnicli`**: every test module sets
   `os.environ["OMNICLI_HOME"] = tempfile.mkdtemp(...)` *before* importing omnicli modules.
@@ -50,8 +50,8 @@ task's verify command → the lead reviews (approve / revise) → git checkpoint
 - Codex images must use `--image=<file>` (the variadic `-i` would swallow the prompt). Muse uses `--image <file>`.
   Claude opens images by path (folder granted with `--add-dir`). `agy` cannot view images headlessly.
 - Model lists: `agy models`, `codex debug models` (JSON), `claude --help` aliases (fable/opus/sonnet),
-  Muse's `~/.config/muse/settings.json` + `muse model-profile show <id>`.
-- Tested CLI versions: claude 2.1.325, codex-cli 0.169.0, agy 1.5.9, muse 1.4.20.
+  Muse's `muse serve --no-session-log` (`model/list`) + `muse model-profile show <id>`.
+- Tested CLI versions: claude 2.1.332, codex-cli 0.172.0, agy 1.5.18, muse 1.4.24.
 
 ## Style
 Match the existing UI helpers in `omnicli/ui.py` (`c_*` colours, `BADGE_*`, `print_table`), respect

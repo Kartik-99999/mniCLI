@@ -13,6 +13,7 @@ import time
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Set, Tuple
 
+from omnicli import paths
 from omnicli.context import ExecutionContext
 from omnicli.models import Pipeline, PipelineResult, Step, StepResult
 from omnicli.scanner import CliScanner
@@ -194,7 +195,7 @@ class ExecutionEngine:
             # Save step output to file for inter-CLI file references
             out_file_path = None
             try:
-                runs_dir = Path.home() / ".omnicli" / "runs"
+                runs_dir = paths.omni_home() / "runs"
                 runs_dir.mkdir(parents=True, exist_ok=True)
                 step_file = runs_dir / f"{step.id}.stdout"
                 step_file.write_text("".join(stdout_lines), encoding="utf-8")

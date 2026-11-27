@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import concurrent.futures
 import datetime
+import hashlib
 import json
 import re
 import shlex
@@ -207,6 +208,17 @@ def classify_task(text: str) -> str:
 
 def file_in_scope(path: str, owns: List[str]) -> bool:
     return paths_overlap([path], owns)
+
+
+# Build/test by-products that are not source changes (relevant when a project has no .gitignore).
+_GENERATED_DIRS = {"__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache", "node_modules", ".tox"}
+_GENERATED_FILES = {".DS_Store", ".coverage"}
+
+
+def is_generated_path(path: str) -> bool:
+    parts = path.split("/")
+    return (any(part in _GENERATED_DIRS or part.endswith(".egg-info") for part in parts[:-1])
+            or parts[-1] in _GENERATED_FILES or parts[-1].endswith((".pyc", ".pyo")))
 
 
 def normalize_tasks(
@@ -524,7 +536,7 @@ RULES:
   in that category when the local history has at least 3 tasks; use the listed evidence to explain close choices.
 - depends_on: ids of tasks that must finish first.
 - owns: the files/directories the task will create or modify (relative paths). Tasks that could run at the same time
-  must not share paths. Use [] if the task touches many places - it will then run alone.
+  must not share paths (give independent tasks explicit, disjoint `owns` paths so they run in parallel). Use [] only if the task touches many places - it will then run alone.
 - Treat the changed files listed above as protected work from the user or another active agent. Do not include
   those paths or their parent directories in task ownership, and do not edit them. If the goal depends on one,
   call out the coordination need and leave that work unassigned until it is no longer protected.
@@ -603,6 +615,7 @@ def build_worker_prompt(task: Task, goal: str, project_dir: Path, agent_name: st
         parts.append("Other agents may be editing other paths at the same time - avoid editing files outside yours unless strictly necessary.")
     if task.verify:
         parts.append(f"After you finish, the lead will run this check, which must pass: {task.verify}")
+        parts.append("Run this check yourself before finishing so any errors are fixed before review.")
     if previous_agents:
         parts += ["", f"NOTE: {', '.join(previous_agents)} attempted this task before you and did not finish. "
                       "Inspect the project, keep whatever partial work is good, and complete the task."]
@@ -908,17 +921,23 @@ class Conductor:
                     spec[slot] = "default"
                 elif not spec.get(args_key):
                     self._option_warnings.append(f"{key} has no supported way to set a {kind}; ignoring {kind} '{value}'")
-                elif kind in ("effort", "lead effort") and not ag.effort_supported(
-                        spec, effort_model, value):
-                    levels = ag.effort_levels(spec, effort_model)
-                    if key == "codex" and effort_model:
-                        reason = (f"catalog support was not confirmed for model '{effort_model}'; "
-                                  "run `omnicli models codex --refresh` to refresh it")
-                    else:
-                        reason = "it accepts " + (", ".join(levels) if levels else "only the CLI default")
-                    self._option_warnings.append(f"{kind} '{value}' ignored for {key}: {reason}")
                 else:
-                    spec[slot] = value
+                    if kind in ("effort", "lead effort") and key in ("codex", "muse") and effort_model:
+                        from omnicli import model_catalog
+                        if (model_catalog.cached_effort_levels(spec, effort_model) is None
+                                and model_catalog._bin_is(spec, key)):
+                            model_catalog.discover(key, spec)
+                    if kind in ("effort", "lead effort") and not ag.effort_supported(
+                            spec, effort_model, value):
+                        levels = ag.effort_levels(spec, effort_model)
+                        if key == "codex" and effort_model:
+                            reason = (f"catalog support was not confirmed for model '{effort_model}'; "
+                                      "run `omnicli models codex --refresh` to refresh it")
+                        else:
+                            reason = "it accepts " + (", ".join(levels) if levels else "only the CLI default")
+                        self._option_warnings.append(f"{kind} '{value}' ignored for {key}: {reason}")
+                    else:
+                        spec[slot] = value
         if self.add_dirs:
             for spec in self.specs.values():
                 if spec.get("add_dir_args"):
@@ -1180,10 +1199,52 @@ class Conductor:
             self.protected_paths = list(dict.fromkeys(self.protected_paths + new_paths))
         return protected_scope_conflicts(self.tasks, new_paths)
 
+    def _dirty_fingerprint(self) -> Dict[str, str]:
+        """{path: content fingerprint} for every uncommitted, non-generated path in the main checkout."""
+        prints: Dict[str, str] = {}
+        for rel in uncommitted_paths(self.dir):
+            if is_generated_path(rel):
+                continue
+            path = self.dir / rel
+            try:
+                if path.is_file():
+                    st = path.stat()
+                    prints[rel] = (hashlib.sha1(path.read_bytes()).hexdigest() if st.st_size <= 4_000_000
+                                   else f"{st.st_size}:{st.st_mtime_ns}")
+                else:
+                    prints[rel] = "<dir>" if path.is_dir() else "<deleted>"
+            except OSError:
+                prints[rel] = "<unreadable>"
+        return prints
+
+    def _out_of_scope_changes(self, task: "Task", before: Optional[Dict[str, str]]) -> List[str]:
+        """Files changed in the shared checkout while `task` ran that are outside its scope and not owned
+        by another task. Those edits would otherwise skip the lead's review and stay in the project."""
+        if before is None:
+            return []
+        after = self._dirty_fingerprint()
+        with self.lock:
+            others = [o.owns for o in self.tasks
+                      if o is not task and o.owns and o.status in ("running", "done", "failed")]
+        return [path for path in sorted(set(before) | set(after))
+                if before.get(path) != after.get(path)
+                and not file_in_scope(path, task.owns)
+                and not any(file_in_scope(path, owns) for owns in others)]
+
     def _changed_files(self, scope: Optional[List[str]]) -> List[str]:
         # Stage only the task's declared paths. `git add -A .` also stages files that
         # another person or process may be editing in this shared checkout.
-        pathspec = [":(literal)" + path for path in scope] if scope else ["."]
+        if scope:
+            pathspec = []
+            for path in scope:
+                if not path:
+                    pathspec.append(".")
+                elif os.path.lexists(self.dir / path) or self._git("ls-files", "--", ":(literal)" + path).stdout.strip():
+                    pathspec.append(":(literal)" + path)
+            if not pathspec:
+                return []
+        else:
+            pathspec = ["."]
         self._git("add", "-A", "--", *pathspec)
         out = self._git("diff", "--cached", "--name-only", "--relative", "--", ".").stdout
         files = [f for f in out.splitlines() if f.strip()]
@@ -1246,16 +1307,20 @@ class Conductor:
         add = subprocess.run(["git", "add", "-A"], cwd=str(workspace), capture_output=True, text=True)
         if add.returncode:
             return [], "", ""
-        pathspec = [":(literal)" + path for path in scope] if scope else ["."]
+        pathspec = [":(literal)" + path for path in scope if path] if scope else ["."]
+        if not pathspec:
+            pathspec = ["."]
         files = subprocess.run(["git", "diff", "--cached", "--name-only", "--relative", "HEAD", "--"] + pathspec,
                                cwd=str(workspace), capture_output=True, text=True).stdout.splitlines()
-        diff = subprocess.run(["git", "diff", "--cached", "--stat", "--patch", "--relative", "HEAD", "--"] + pathspec,
+        stat = subprocess.run(["git", "diff", "--cached", "--stat", "--relative", "HEAD", "--"] + pathspec,
+                              cwd=str(workspace), capture_output=True, text=True).stdout
+        diff = subprocess.run(["git", "diff", "--cached", "--relative", "HEAD", "--"] + pathspec,
                               cwd=str(workspace), capture_output=True, text=True).stdout
         patch = subprocess.run(["git", "diff", "--cached", "--binary", "HEAD", "--"] + pathspec,
                                cwd=str(workspace), capture_output=True, text=True).stdout
         if len(diff) > MAX_DIFF_CHARS:
-            diff = diff[:MAX_DIFF_CHARS] + "\n... (diff truncated)"
-        return [f for f in files if f.strip()], diff.strip(), patch
+            diff = diff[:MAX_DIFF_CHARS] + f"\n... (diff truncated, {len(diff)} chars total - read the files directly for more)"
+        return [f for f in files if f.strip()], f"{stat.strip()}\n\n{diff}".strip(), patch
 
     def _checkpoint_workspace(self, task: Task, workspace: Path, scope: Optional[List[str]], label: str = "") -> str:
         """Apply the reviewed task patch to the main tree and checkpoint it there."""
@@ -1313,7 +1378,7 @@ class Conductor:
 
         self.healthy = [n for n in order if health.get(n, {}).get("ok")]
         if not self.healthy:
-            self.say(f"{BADGE_FAILED} No AI CLI is usable right now. Log in to at least one (e.g. `claude`, `codex login`, `agy`).")
+            self.say(f"{BADGE_FAILED} No AI CLI is usable right now. Log in to at least one (e.g. `claude`, `codex login`, `agy`, `muse login`).")
             return False
 
         wanted_lead = self.cfg.lead or getattr(self, "_saved_lead", "")
@@ -1877,6 +1942,10 @@ class Conductor:
             if agent != "human":
                 previous_builders = [a["agent"] for a in t.attempts if a.get("result") == "revise"]
                 agent = self._pick_worker(exclude=previous_builders + ["human"]) or agent
+        # In the shared checkout only the task's scope is reviewed and checkpointed, so remember what was
+        # already changed when the task started (once, so undoing a stray edit on a retry counts as clean):
+        # anything else changed outside the scope must not slip past the review.
+        before_dirty = self._dirty_fingerprint() if workspace == self.dir and self.git and t.owns else None
 
         while True:
             if self.stopping:
@@ -1978,6 +2047,12 @@ class Conductor:
                 files, changes = self.collect_changes(scope)
             else:
                 files, changes, _patch = self._collect_workspace_changes(workspace, scope)
+            outside = self._out_of_scope_changes(t, before_dirty)
+            if outside:
+                changes = (changes + "\n\n" if changes else "") + (
+                    "WARNING: the worker ALSO changed these files OUTSIDE this task's scope. They are not in the "
+                    "diff above and will not be checkpointed; the task cannot be approved until they are undone:\n"
+                    + "\n".join("- " + path for path in outside[:50]))
 
             issues = self.workflow_issues(previous, workspace)
             regressions = {cmd: reason for cmd, reason in issues.items() if cmd in t.passing_workflow_checks}
@@ -2029,6 +2104,14 @@ class Conductor:
 
             approved = str(verdict.get("verdict", "")).strip().lower() == "approve"
             feedback = str(verdict.get("feedback") or "").strip()
+            if outside:
+                # out-of-scope edits were never reviewed: this attempt cannot be approved
+                shown = ", ".join(outside[:5]) + (" ..." if len(outside) > 5 else "")
+                self.say(f"{BADGE_WARN} {t.id} changed {len(outside)} file(s) outside its scope ({shown}); "
+                         "it cannot be approved until they are undone")
+                approved = False
+                feedback = ("Undo your changes to files outside this task's scope: " + ", ".join(outside[:20])
+                            + ". Only edit: " + ", ".join(t.owns) + "." + (" " + feedback if feedback else ""))
             if approved and self.cfg.approve_tasks:
                 decision, user_note = self.approve_task_preview(t, agent, files, changes)
                 if decision == "revise":
@@ -2070,6 +2153,9 @@ class Conductor:
                         t.status = "failed"
                         t.review_note = f"Acceptance still unmet after {revision + 1} attempt(s): " + (
                             feedback or "acceptance criteria remain unmet")
+                        if outside:
+                            t.review_note += (" | NOT reviewed or checkpointed, still in your project (inspect with "
+                                              "`git diff` / `git status`): " + ", ".join(outside[:20]))
                     t.duration_sec = time.time() - start
                 if approved:
                     if workspace != self.dir:
@@ -2084,6 +2170,8 @@ class Conductor:
                     self.say(f"{BADGE_SUCCESS} {c_bold(t.id)} {t.title} - by {c_cyan(agent)}"
                              f"{c_dim(' @' + t.commit) if t.commit else ''}{extra}")
                 else:
+                    if workspace == self.dir:
+                        t.commit = self.checkpoint(t, scope, "[needs work]")
                     self.say(f"{BADGE_FAILED} {c_bold(t.id)} {t.title}: {t.review_note}")
                 return
 

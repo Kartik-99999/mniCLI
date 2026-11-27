@@ -11,10 +11,12 @@ import sys
 from pathlib import Path
 from typing import Optional
 
+from omnicli import paths
+
 
 def synthesize(output_dir: Optional[str] = None):
     target_dir = Path(output_dir or os.getcwd()).resolve()
-    runs_dir = Path.home() / ".omnicli" / "runs"
+    runs_dir = paths.omni_home() / "runs"
 
     def read_run(name: str) -> str:
         f = runs_dir / f"{name}.stdout"

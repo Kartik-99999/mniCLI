@@ -44,7 +44,7 @@ NAMES = ["chat"]
 
 HISTORY_TURNS = 8          # conversation turns sent to the AI each message
 TURN_CHARS = 1500          # each remembered turn is trimmed to this
-ACTION_RE = re.compile(r"^\s*`*\s*ACTION\s*:\s*(\{.*\})\s*`*\s*$", re.I)
+ACTION_RE = re.compile(r"^\s*[`*_]*ACTION[`*_]*\s*:[`*_]*\s*[`*_]*(\{.*\})[`*_]*\s*$", re.I)
 
 # Commands the AI may run for you. Anything that changes things still asks you itself
 # (undo/resume/review --fix confirm), and -y/--yes is always stripped from AI proposals.

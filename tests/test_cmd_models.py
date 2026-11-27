@@ -144,7 +144,7 @@ class TestCatalog(Base):
     def test_effort_levels(self):
         sp = self.specs()
         self.assertIn("high", model_catalog.effort_levels(sp["agy"]))
-        self.assertEqual(model_catalog.effort_levels(sp["agy"]), ["low", "medium", "high"])
+        self.assertEqual(model_catalog.effort_levels(sp["agy"]), ["low", "medium", "high", "xhigh", "max"])
         self.assertEqual(model_catalog.effort_levels(sp["agy"], "gemini-3.8-flash-high", runner=self.runner), ["high"])
         self.assertEqual(model_catalog.effort_levels(sp["muse"], "muse-spark-1.3", runner=self.runner),
                          ["low", "medium", "high", "max"])
@@ -254,15 +254,53 @@ class TestSetupAndPickers(Base):
         self.assertEqual(settings.get("lead_models.claude"), "opus")
 
     def test_effort_picker_uses_selected_muse_models_supported_levels(self):
+        import re
         sp = self.specs()
         catalog = {"models": [{"id": "muse-spark-1.3-contributor", "effort_levels": ["low", "high"]}]}
         with mock.patch.object(model_catalog, "discover", return_value=catalog):
             choice = models_cmd.pick_effort("muse", sp["muse"], scripted(["2"]), self.out.append,
                                             save=False, model="muse-spark-1.3-contributor")
         self.assertEqual(choice, "high")
-        output = "\n".join(self.out)
+        output = re.sub(r"\x1b\[[0-9;]*m", "", "\n".join(self.out))
         self.assertIn("1) low", output)
         self.assertIn("2) high", output)
+
+    def test_codex_dict_reasoning_levels_and_stale_cache_refresh(self):
+        sp = self.specs()
+        codex_dict_json = json.dumps({"models": [
+            {"slug": "gpt-6-luna", "display_name": "GPT-6-Luna", "visibility": "list",
+             "default_reasoning_level": "medium",
+             "supported_reasoning_levels": [
+                 {"effort": "low", "description": "Fast"},
+                 {"effort": "xhigh", "description": "Deep"},
+             ]},
+        ]})
+        info = model_catalog.discover("codex", sp["codex"],
+                                      runner=lambda cmd, timeout=30: codex_dict_json)
+        self.assertEqual(info["models"][0]["effort_levels"], ["low", "xhigh"])
+        # Stale cache missing effort_levels is ignored and refreshed automatically
+        model_catalog._save_cache({"codex": {"at": 9999999999, "data": {
+            "source": "codex debug models",
+            "models": [{"id": "gpt-6-luna", "name": "GPT-6-Luna"}],
+        }}})
+        with mock.patch.object(model_catalog, "_run", return_value=codex_dict_json):
+            refreshed = model_catalog.discover("codex", sp["codex"])
+        self.assertEqual(refreshed["models"][0]["effort_levels"], ["low", "xhigh"])
+
+    def test_lead_effort_picker_uses_lead_model_when_model_is_omitted(self):
+        sp = self.specs()
+        settings.set_value("models.muse", "muse-spark-1.2")
+        settings.set_value("lead_models.muse", "muse-spark-1.3")
+        catalog = {"models": [
+            {"id": "muse-spark-1.2", "effort_levels": ["low", "medium"]},
+            {"id": "muse-spark-1.3", "effort_levels": ["low", "high", "max"]},
+        ]}
+        with mock.patch.object(model_catalog, "discover", return_value=catalog):
+            choice = models_cmd.pick_effort("muse", sp["muse"], scripted(["3"]), self.out.append,
+                                            save=True, setting_key="lead_effort",
+                                            role_label="lead planning and review")
+        self.assertEqual(choice, "max")
+        self.assertEqual(settings.get("lead_effort.muse"), "max")
 
     def test_effort_picker_clears_saved_tier_not_supported_by_selected_model(self):
         sp = self.specs()

@@ -7,11 +7,13 @@ available on the host device.
 import concurrent.futures
 import json
 import os
+import shlex
 import shutil
 import subprocess
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
+from omnicli import paths
 from omnicli.models import CliCategory, CliTool
 
 # Known CLI metadata catalog: (name, category, version_arg, description, alternatives)
@@ -91,14 +93,14 @@ KNOWN_TOOLS = [
     ("unzip", CliCategory.SYSTEM, "-v", "Extract compressed archives", []),
 ]
 
-INVENTORY_CACHE_PATH = Path.home() / ".omnicli" / "inventory.json"
+INVENTORY_CACHE_PATH = paths.omni_home() / "inventory.json"
 
 
 class CliScanner:
     """Discovers and caches available CLI tools on the host."""
 
     def __init__(self, cache_path: Optional[Path] = None):
-        self.cache_path = cache_path or INVENTORY_CACHE_PATH
+        self.cache_path = cache_path or (paths.omni_home() / "inventory.json")
         self.tools: Dict[str, CliTool] = {}
         self._load_cache()
 
@@ -138,14 +140,14 @@ class CliScanner:
 
         version_str: Optional[str] = None
         try:
-            cmd = f"{path} {version_arg}"
+            argv = [path] + (shlex.split(version_arg) if version_arg else [])
             res = subprocess.run(
-                cmd,
-                shell=True,
+                argv,
+                stdin=subprocess.DEVNULL,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
-                timeout=1.2,
+                timeout=3.0,
             )
             raw = (res.stdout or res.stderr or "").strip()
             if raw:
