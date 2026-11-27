@@ -263,9 +263,9 @@ class TestConductorEndToEnd(unittest.TestCase):
         c = self.make({"alpha": "good"}, lead="alpha")
         c.workers = ["alpha"]
         replies = [
-            {"project_name": "demo", "tasks": [{"id": "t1", "title": "Build", "assignee": "alpha",
+            {"project_name": "demo", "workflows": [{"kind": "inspection", "scenario": "Read the result.", "check_task": ""}], "tasks": [{"id": "t1", "title": "Build", "assignee": "alpha",
                                                     "owns": ["."]}]},
-            {"project_name": "demo", "tasks": [{"id": "t1", "title": "Build", "assignee": "alpha",
+            {"project_name": "demo", "workflows": [{"kind": "inspection", "scenario": "Read the result.", "check_task": ""}], "tasks": [{"id": "t1", "title": "Build", "assignee": "alpha",
                                                     "owns": ["src"]}]},
         ]
         prompts = []
@@ -459,6 +459,30 @@ class TestConductorEndToEnd(unittest.TestCase):
         self.assertEqual(len(first.attempts), 2)
         self.assertEqual(first.attempts[0]["result"], "revise")
         self.assertIn("revised", (self.proj / "a/a.txt").read_text())
+
+    def test_failed_check_reaches_worker_before_an_optimistic_approval(self):
+        c = self.make({"alpha": "good"}, lead="alpha", jobs=1, use_worktrees=True, max_rounds=1)
+        plan = c.plan
+
+        def plan_behavior_check():
+            self.assertTrue(plan())
+            c.tasks[0].verify = "grep -q revised a/a.txt"
+            return True
+
+        with mock.patch.object(c, "plan", side_effect=plan_behavior_check):
+            self.assertEqual(c.run(), 0)
+        first = c.tasks[0]
+        self.assertEqual([a["result"] for a in first.attempts], ["revise", "approved"])
+        self.assertIn("grep -q revised a/a.txt", first.attempts[0]["feedback"])
+        self.assertIn("revised", (self.proj / "a/a.txt").read_text())
+
+    def test_rejected_worktree_stays_available_without_merging(self):
+        c = self.make({"alpha": "picky"}, lead="alpha", jobs=1, use_worktrees=True, retries=0, max_rounds=1)
+        self.assertEqual(c.run(), 2)
+        first = c.tasks[0]
+        self.assertEqual((first.status, first.commit), ("failed", ""))
+        self.assertTrue((Path(first.workspace) / "a/a.txt").is_file())
+        self.assertFalse((self.proj / "a/a.txt").exists())
 
     def test_last_review_revision_does_not_count_as_complete_when_verify_passes(self):
         c = self.make({"alpha": "good"}, lead="alpha", jobs=1, retries=0)

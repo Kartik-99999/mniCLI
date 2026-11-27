@@ -199,7 +199,8 @@ class TestSession(ChatBase):
         s.loop()
         self.assertEqual(len(FakeConductor.instances), 1)
         cfg = FakeConductor.instances[0].cfg
-        self.assertEqual(cfg.goal, "create hello.txt saying hi")
+        self.assertIn("please build a hello project", cfg.goal)
+        self.assertIn("create hello.txt saying hi", cfg.goal)
         self.assertEqual(cfg.project_dir, (self.tmp / "hello-proj").resolve())
         self.assertFalse(cfg.resume)
         self.assertEqual(s.project, (self.tmp / "hello-proj").resolve())

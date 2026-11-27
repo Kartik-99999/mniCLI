@@ -438,7 +438,7 @@ def prepare_replay(ref: str, destination: str):
             continue
         task = dict(old)
         task.update(status="pending", agent_used="", summary="", review_note="", attempts=[], commit="",
-                    duration_sec=0.0, workspace="", outcome_recorded=False)
+                    duration_sec=0.0, workspace="", outcome_recorded=False, passing_workflow_checks=None)
         tasks.append(task)
     if not tasks:
         raise ValueError("the source run has no valid tasks to replay")
@@ -524,7 +524,7 @@ def prepare_fork(ref: str, task_id: str, agent: str, destination: Optional[str] 
             task["status"] = "done"
             continue
         task.update(status="pending", agent_used="", summary="", review_note="", attempts=[], commit="",
-                    duration_sec=0.0, workspace="", outcome_recorded=False)
+                    duration_sec=0.0, workspace="", outcome_recorded=False, passing_workflow_checks=None)
     tasks[index]["assignee"] = agent
     fork_state = dict(state)
     fork_state.update(dir=str(target), phase="planned", pid=0, final={}, started_at=time.time(),

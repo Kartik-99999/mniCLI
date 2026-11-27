@@ -28,7 +28,7 @@ from typing import Callable, Dict, List, Optional, Tuple
 import os
 
 from omnicli import agents as ag
-from omnicli import ledger
+from omnicli import ledger, workflows
 from omnicli import runs as run_registry
 from omnicli.ui import (
     BADGE_FAILED,
@@ -58,7 +58,8 @@ GIT_EXCLUDES = [".omnicli/", "node_modules/", ".venv/", "venv/", "__pycache__/",
                 ".ssh/", ".aws/", ".npmrc", ".pypirc", ".netrc", "credentials.json", "service-account*.json",
                 "*.tfstate", "*.tfstate.*"]
 PROBE_TOOLS = ["python3", "pip3", "pytest", "node", "npm", "npx", "pnpm", "yarn", "bun", "deno",
-               "go", "cargo", "java", "mvn", "gradle", "make", "docker", "ruby", "php", "swift"]
+               "go", "cargo", "java", "mvn", "gradle", "make", "docker", "ruby", "php", "swift",
+               "chromium", "google-chrome", "firefox"]
 SUMMARY_MARKER = "=== SUMMARY ==="
 MAX_DIFF_CHARS = 14000
 
@@ -87,6 +88,8 @@ class Task:
     duration_sec: float = 0.0
     workspace: str = ""
     outcome_recorded: bool = False
+    # Behaviors observed before or during this task that each subsequent revision must retain.
+    passing_workflow_checks: Optional[List[str]] = None
 
     @classmethod
     def from_dict(cls, d: Dict) -> "Task":
@@ -484,10 +487,25 @@ Tools installed on this machine: {", ".join(tools) or "unknown"}
 NOT installed: {", ".join(missing or []) or "(nothing notable)"}
 Workers run sandboxed and usually cannot install packages, so verify commands must only use installed tools.
 
+{workflows.editor_reference(goal)}
+
 LOCAL SKILL HISTORY (aggregate outcomes only; use as a routing hint, not a guarantee):
 {performance}
 
 RULES:
+- Research the existing product through its entry points, tests, and relevant docs. In the summary give workers
+  the paths, interface decisions, and constraints they will need. For unfamiliar or version-sensitive APIs,
+  use primary docs if accessible and identify assumptions that need a local experiment.
+- Record the main user workflows before splitting the implementation. For each, describe the user's action,
+  the resulting state, and what must still work after the next action or reload. Assign a behavior test to a
+  task and reference its id in check_task. For independently shipped features, use focused checks so a later
+  change can be tested against each finished feature. Workflows may share an integration suite. For inspectable
+  deliverables such as documentation, set kind to inspection and describe what the reviewer must inspect.
+  For interactive user journeys set kind to interaction. If execution is unavailable, leave check_task empty
+  and report that journey as unverified.
+  For interactive apps, inspect the project's test dependencies and available browser tooling. Plan an
+  interaction through the public UI and assert the changed state. Vary the test data or operation order.
+  A file-existence check, build success, or screenshot alone cannot demonstrate an interaction.
 - Read the relevant entry points and existing tests before naming interfaces or proposing new files.
   Use the fewest tasks needed, at most {max_tasks}. A focused change can be one task including its checks.
 - Translate the user's requested outcome into concrete, user-visible behaviors. Give every task specific acceptance
@@ -527,6 +545,7 @@ RULES:
 
 Reply with ONLY a JSON object (no prose) of this shape:
 {{"project_name": "kebab-case-name", "summary": "one paragraph describing the approach and architecture",
+  "workflows": [{{"scenario": "action and observable result", "kind": "interaction", "check_task": "t1"}}],
   "tasks": [{TASK_JSON_SHAPE}]}}
 """
 
@@ -537,7 +556,8 @@ def build_worker_prompt(task: Task, goal: str, project_dir: Path, agent_name: st
                         extra_dirs: Optional[List[str]] = None,
                         team_memory: Optional[List[Dict]] = None,
                         model: str = "", effort: str = "",
-                        protected_paths: Optional[List[str]] = None) -> str:
+                        protected_paths: Optional[List[str]] = None, plan_summary: str = "",
+                        user_workflows: Optional[List[Dict]] = None) -> str:
     board = []
     for t in all_tasks:
         if t.id == task.id:
@@ -564,6 +584,15 @@ def build_worker_prompt(task: Task, goal: str, project_dir: Path, agent_name: st
         f"Acceptance criteria: {task.acceptance or 'the instructions above are fully implemented and working'}",
         f"Files/dirs you own: {owns}",
     ]
+    reference = workflows.editor_reference(goal)
+    if reference:
+        parts += ["", reference]
+    if plan_summary:
+        parts += ["", "SHARED IMPLEMENTATION DECISIONS:", plan_summary]
+    if user_workflows:
+        parts += ["", "USER WORKFLOWS (implement your assigned part):", workflows.describe(user_workflows),
+                  "If your task owns a workflow check, exercise it through the public entry point. Assert the "
+                  "observable result after the action. A smoke test that only opens a page cannot demonstrate editing."]
     if protected_paths:
         parts += ["", "PROTECTED FILES already being edited by the user or another active agent:",
                   "Do not modify these paths or any parent directory that contains them:",
@@ -698,16 +727,28 @@ def enforce_completion_gate(data: Dict, tasks: List[Task],
 
 def build_final_prompt(goal: str, project_dir: Path, tasks: List[Task], workers: List[str],
                        specs: Dict[str, Dict], round_no: int, can_add: bool, max_tasks: int,
-                       checks: Optional[List[Tuple[str, Tuple[int, str, str]]]] = None) -> str:
+                       checks: Optional[List[Tuple[str, Tuple[int, str, str]]]] = None,
+                      user_workflows: Optional[List[Dict]] = None) -> str:
     rows = []
     for t in tasks:
         note = f" | lead note: {t.review_note}" if t.review_note else ""
-        rows.append(f"- {t.id} [{t.status}] ({t.agent_used or t.assignee}) {t.title}: {first_line(t.summary)}{note}")
+        check = f" | check: {t.verify}" if t.verify else ""
+        rows.append(f"- {t.id} [{t.status}] ({t.agent_used or t.assignee}) {t.title}: {first_line(t.summary)}{note}{check}")
     followup = (
         f'If something essential is missing or broken, list up to {max_tasks} follow-up tasks in "followup_tasks" using the same '
         f"task shape (workers: {', '.join(workers)}):\n{TASK_JSON_SHAPE}\n"
         if can_add else 'No more work rounds are available, so "followup_tasks" must be [].\n'
     )
+    workflow_block = ""
+    if user_workflows:
+        workflow_block = ("\nAGREED USER WORKFLOWS:\n" + workflows.describe(user_workflows) +
+                          "\nFor each W id return a workflow_results entry with status met, unmet, or unverified "
+                          "and evidence. Inspect the relevant implementation and what its tests actually assert. "
+                          "Cite the observed state change or a specific file and symbol for inspected work. "
+                          "Mark an interactive workflow unverified if only appearance was checked. For an unmet "
+                          "workflow, identify the first broken step and propose a focused repair. If a workflow "
+                          "had no original check, supply check_task with the id of a finished task whose executed "
+                          "check exercises it.\n")
     return f"""[OmniCLI team - final check]
 You are the LEAD ENGINEER. Round {round_no} of the team's work has finished. Inspect the project directory
 (read files; do not modify anything) and decide whether the PROJECT GOAL is complete.
@@ -724,6 +765,8 @@ TASK RESULTS:
 AUTOMATED CHECKS - OmniCLI just re-ran every task's verify command on the current project state.
 You are read-only and cannot run commands yourself; treat these results as having been executed:
 {format_checks(checks or [])}
+{workflow_block}
+{workflows.editor_reference(goal)}
 
 COMPLETION BAR:
 - Compare the delivered product directly against every capability and workflow in the user's original goal.
@@ -734,6 +777,7 @@ COMPLETION BAR:
 - Report complete=true only when the requested core workflows work end to end and no required feature is still a
   stub or materially below the requested scope. If the goal was intentionally reduced to an MVP, disclose that
   plainly and report complete=false unless the user asked for an MVP.
+- List release-blocking gaps in remaining_issues. Put optional improvements in the summary.
 - A failed required verification command or any task that did not finish successfully means the project is not
   complete, even if other checks pass.
 
@@ -743,6 +787,7 @@ WORKERS:
 {followup}
 Reply with ONLY a JSON object:
 {{"complete": true or false, "summary": "what the project now is and does", "how_to_run": "exact commands to install/run/test it",
+  "workflow_results": {{"W1": {{"status": "met", "evidence": "specific observation"}}}},
   "remaining_issues": ["..."], "followup_tasks": []}}
 """
 
@@ -804,6 +849,7 @@ class Conductor:
         self.goal = cfg.goal
         self.tasks: List[Task] = []
         self.plan_summary = ""
+        self.workflows: List[Dict] = []
         self.project_name = ""
         self.protected_paths: List[str] = []
         self.lead: str = ""
@@ -998,6 +1044,7 @@ class Conductor:
                 "goal": self.goal,
                 "project_name": self.project_name,
                 "plan_summary": self.plan_summary,
+                "workflows": self.workflows,
                 "lead": self.lead,
                 "workers": self.workers,
                 "round": self.round,
@@ -1040,6 +1087,7 @@ class Conductor:
         self.phase = data.get("phase", "planned")
         self.protected_paths = [str(path) for path in data.get("protected_paths", []) if isinstance(path, str)]
         self.tasks = [Task.from_dict(t) for t in data.get("tasks", [])]
+        self.workflows = workflows.from_plan(data, self.tasks) if data.get("workflows") else []
         for t in self.tasks:
             if t.status == "running":
                 t.status = "pending"
@@ -1382,7 +1430,8 @@ class Conductor:
 
     # ---------------------------------------------------------------- lead
     def ask_lead(self, kind: str, prompt: str, required_key: str,
-                 exclude_vendor: Optional[str] = None, workspace: Optional[Path] = None) -> Optional[Dict]:
+                 exclude_vendor: Optional[str] = None, workspace: Optional[Path] = None,
+                 validate: Optional[Callable[[Dict], str]] = None) -> Optional[Dict]:
         """Ask the lead for a JSON decision; on failure fall back to another healthy agent as lead.
 
         Returns None when no lead answers, including when the session budget is used up
@@ -1435,12 +1484,13 @@ class Conductor:
                         self._mark_down(name, run.failure_reason())
                     break
                 data = ag.extract_json(run.output, required_key)
-                if data is not None:
+                error = validate(data) if validate and data is not None else ""
+                if data is not None and not error:
                     if name != self.lead:
                         self.say(f"{BADGE_WARN} {self.lead} could not lead; {c_magenta(name)} is now the lead.")
                         self.lead = name
                     return data
-                p = prompt + "\n\nIMPORTANT: your previous reply could not be parsed. Reply with ONLY the JSON object, nothing else."
+                p = prompt + "\n\n" + (error or "Your previous reply could not be parsed.") + " Reply with only the corrected JSON."
         resets = [float(self.quota_resets.get(name, {}).get("reset_at", 0) or 0)
                   for name in candidates if name not in self.down and
                   float(self.quota_resets.get(name, {}).get("reset_at", 0) or 0) > time.time()]
@@ -1452,7 +1502,8 @@ class Conductor:
                 time.sleep(min(30.0, reset_at - time.time()))
                 self.quota_resets = ledger.active_quota_resets()
             if not self.stopping:
-                return self.ask_lead(kind, prompt, required_key, exclude_vendor=exclude_vendor, workspace=workspace)
+                return self.ask_lead(kind, prompt, required_key, exclude_vendor=exclude_vendor,
+                                     workspace=workspace, validate=validate)
         return None
 
     # ---------------------------------------------------------------- plan
@@ -1474,20 +1525,22 @@ class Conductor:
                 return False
             tasks = normalize_tasks(data["tasks"], plan_workers, max_tasks=self.cfg.max_tasks, round_no=1)
             conflicts = protected_scope_conflicts(tasks, self.protected_paths)
-            if not conflicts:
-                self.tasks = tasks
-                self.project_name = (str(self.cfg.project_name or "").strip()
-                                     or str(data.get("project_name") or self.dir.name))
-                self.plan_summary = str(data.get("summary") or "")
-                break
+            if conflicts:
+                problem = "PLAN REJECTED FOR FILE OWNERSHIP CONFLICTS: " + "; ".join(conflicts)
+            else:
+                try:
+                    self.workflows = workflows.from_plan(data, tasks)
+                    self.tasks = tasks
+                    self.project_name = (str(self.cfg.project_name or "").strip()
+                                         or str(data.get("project_name") or self.dir.name))
+                    self.plan_summary = str(data.get("summary") or "")
+                    break
+                except ValueError as ex:
+                    problem = str(ex)
+            self.say(f"{BADGE_WARN} {problem}")
             if attempt:
-                self.say(f"{BADGE_FAILED} Plan still overlaps files already being edited: " + "; ".join(conflicts))
-                self.say(c_dim("No tasks were started. Coordinate with the other editor or ask for a plan that avoids those paths."))
                 return False
-            self.say(f"{BADGE_WARN} The plan overlaps files already being edited; asking the lead to re-plan around them.")
-            prompt += ("\n\nPLAN REJECTED FOR FILE OWNERSHIP CONFLICTS. Do not reuse the conflicting scopes. "
-                       "Return a complete corrected plan with explicit, narrow `owns` paths for every task. "
-                       "Conflict details: " + "; ".join(conflicts))
+            prompt += "\n\n" + problem + "\nReturn a complete corrected plan."
         self.save_state()
         return bool(self.tasks)
 
@@ -1495,6 +1548,8 @@ class Conductor:
         tasks = tasks if tasks is not None else self.tasks
         if self.plan_summary and tasks is self.tasks:
             self.say(f"\n{c_bold('Approach:')} {self.plan_summary}")
+        if tasks is self.tasks and self.workflows:
+            self.say(c_bold("User workflows:") + "\n" + workflows.describe(self.workflows))
         if tasks is self.tasks and self.protected_paths:
             if self.cfg.use_git:
                 self.say(f"{BADGE_INFO} Detected {len(self.protected_paths)} active-edit path(s). OmniCLI will preserve them and run worker tasks in isolated Git worktrees.")
@@ -1785,19 +1840,43 @@ class Conductor:
                                            policy=_settings.get("verify_policy"),
                                            sandbox=bool(_settings.get("verify_sandbox")))
             out = out.strip()
-            return code, out[-3000:], missing_dependency(code, out, self.dir)
+            return code, out[-3000:], missing_dependency(code, out, run_dir)
         except Exception as ex:
             return 1, f"could not run verify command: {ex}", ""
+
+    def workflow_issues(self, commands, workspace):
+        issues = {}
+        for command in dict.fromkeys(commands):
+            check = Task(id="workflow", title="", assignee="", instructions="", verify=command)
+            problem = workflows.check_problem(command, self.run_verify(check, workspace))
+            if problem:
+                issues[command] = problem
+        return issues
 
     def _run_task(self, t: Task):
         start = time.time()
         workspace = self._task_workspace(t)
+        finished = [task for task in self.tasks if task.status in ("done", "failed") and task.id != t.id]
+        linked_checks = workflows.interaction_commands(self.workflows, finished)
+        previous = [cmd for cmd in linked_checks if cmd != t.verify]
+        if t.passing_workflow_checks is None:
+            issues = self.workflow_issues(previous, workspace)
+            t.passing_workflow_checks = [cmd for cmd in previous if cmd not in issues]
+            if previous:
+                self.save_state()
+        interaction = t.verify in linked_checks or bool(workflows.interaction_commands(self.workflows, [t]))
         tried: List[str] = []
         agent = "human" if t.assignee == "human" and self.cfg.human_worker else (
             t.assignee if self._usable(t.assignee) else self._pick_worker(exclude=[]))
         if agent and agent != t.assignee:
             self.say(f"{BADGE_WARN} {t.id}: {t.assignee} unavailable, giving it to {agent}")
         revision, feedback = 0, ""
+        if t.attempts and t.attempts[-1].get("result") == "revise" and "workflow_regressions" in t.attempts[-1]:
+            last = t.attempts[-1]
+            revision, feedback = last.get("revision", 0) + 1, last["feedback"]
+            if agent != "human":
+                previous_builders = [a["agent"] for a in t.attempts if a.get("result") == "revise"]
+                agent = self._pick_worker(exclude=previous_builders + ["human"]) or agent
 
         while True:
             if self.stopping:
@@ -1834,7 +1913,8 @@ class Conductor:
                                          extra_dirs=spec.get("_add_dirs") or None,
                                          team_memory=ledger.read_team_memory(t.category, project=str(self.dir)),
                                          model=spec.get("_model", ""), effort=spec.get("_effort", ""),
-                                         protected_paths=self.protected_paths)
+                                         protected_paths=self.protected_paths, plan_summary=self.plan_summary,
+                                         user_workflows=self.workflows)
 
             def on_line(line: str, _label=label, _tid=t.id):
                 with self.lock:
@@ -1899,7 +1979,26 @@ class Conductor:
             else:
                 files, changes, _patch = self._collect_workspace_changes(workspace, scope)
 
-            if self.cfg.review:
+            issues = self.workflow_issues(previous, workspace)
+            regressions = {cmd: reason for cmd, reason in issues.items() if cmd in t.passing_workflow_checks}
+            # A revision may restore a previously broken journey before it finishes its own task.
+            # Keep that gain as a requirement for the next revision, even after a pause.
+            t.passing_workflow_checks = [cmd for cmd in previous if cmd not in issues or cmd in regressions]
+            behavior_problem = workflows.check_problem(t.verify, verify) if interaction else ""
+            if regressions or behavior_problem:
+                details = ["Previously passed `{}`, now {}.".format(cmd, reason)
+                           for cmd, reason in regressions.items()]
+                if behavior_problem:
+                    details.append("Task check `{}`: {}.".format(t.verify, behavior_problem))
+                attempt["workflow_regressions"] = list(regressions)
+                verdict = {"verdict": "revise", "summary": first_line(summary),
+                           "feedback": "Repair the implementation and keep the acceptance checks intact.\n"
+                                       + "\n".join(details)}
+            elif not verify_passed(verify):
+                verdict = {"verdict": "revise", "summary": first_line(summary),
+                           "feedback": f"Repair the behavior behind `{t.verify}` (exit {verify[0]}). "
+                                       f"Keep the acceptance check intact and rerun it.\n{verify[1]}"}
+            elif self.cfg.review:
                 self.say(f"  {c_dim('lead ' + self.lead + ' reviewing ' + t.id + '...')}")
                 verdict = self.ask_lead("review", build_review_prompt(
                     t, self.goal, agent, summary, changes, verify, revision, self.cfg.retries), "verdict",
@@ -1907,7 +2006,7 @@ class Conductor:
                 if self.stopping:
                     return
                 if verdict is None:
-                    ok = verify_passed(verify)
+                    ok = bool(verify and verify[0] == 0 and not self.cfg.cross_vendor_review)
                     if self.budget_reason and not ok:
                         # needs a review or revision the budget doesn't allow: pause, don't fail
                         attempt.update({"result": "paused: budget reached before review", "files_changed": len(files),
@@ -1918,7 +2017,7 @@ class Conductor:
                         self.say(f"{BADGE_WARN} {t.id} paused: budget reached before its review ({self.budget_reason})")
                         return
                     verdict = {"verdict": "approve" if ok else "revise",
-                               "feedback": "" if ok else f"The check `{t.verify}` fails. Make it pass.",
+                               "feedback": "" if ok else "Review unavailable and no sufficient independent verification.",
                                "summary": first_line(summary)}
                     why = "budget reached" if self.budget_reason else "lead review unavailable"
                     self.say(f"{BADGE_WARN} {why} for {t.id}; using the verify result instead")
@@ -1926,12 +2025,9 @@ class Conductor:
                         with self.lock:
                             t.review_note = "not reviewed by the lead (budget reached); accepted on its verify result"
             else:
-                ok = verify_passed(verify)
-                verdict = {"verdict": "approve" if ok else "revise",
-                           "feedback": "" if ok else f"The check `{t.verify}` fails:\n{verify[1] if verify else ''}",
-                           "summary": first_line(summary)}
+                verdict = {"verdict": "approve", "feedback": "", "summary": first_line(summary)}
 
-            approved = str(verdict.get("verdict", "")).lower().startswith("approve")
+            approved = str(verdict.get("verdict", "")).strip().lower() == "approve"
             feedback = str(verdict.get("feedback") or "").strip()
             if approved and self.cfg.approve_tasks:
                 decision, user_note = self.approve_task_preview(t, agent, files, changes)
@@ -1970,19 +2066,20 @@ class Conductor:
                 with self.lock:
                     t.agent_used = agent
                     t.summary = str(verdict.get("summary") or "") + ("\n" + summary if summary else "")
-                    if approved:
-                        t.status = "done"
-                    else:
+                    if not approved:
                         t.status = "failed"
-                        t.review_note = f"lead still requested changes after {revision + 1} attempt(s): " + (
+                        t.review_note = f"Acceptance still unmet after {revision + 1} attempt(s): " + (
                             feedback or "acceptance criteria remain unmet")
                     t.duration_sec = time.time() - start
-                label_txt = "" if approved else ("[with reservations]" if t.status == "done" else "[needs work]")
-                t.commit = (self._checkpoint_workspace(t, workspace, scope, label_txt)
-                            if workspace != self.dir else self.checkpoint(t, scope, label_txt))
-                if t.status == "done" and workspace != self.dir:
-                    self._remove_task_workspace(t)
-                if t.status == "done":
+                if approved:
+                    if workspace != self.dir:
+                        t.commit = self._checkpoint_workspace(t, workspace, scope)
+                    else:
+                        t.commit = self.checkpoint(t, scope)
+                    with self.lock:
+                        t.status = "done"
+                    if workspace != self.dir:
+                        self._remove_task_workspace(t)
                     extra = c_dim(f" ({t.review_note})") if t.review_note else ""
                     self.say(f"{BADGE_SUCCESS} {c_bold(t.id)} {t.title} - by {c_cyan(agent)}"
                              f"{c_dim(' @' + t.commit) if t.commit else ''}{extra}")
@@ -1991,7 +2088,13 @@ class Conductor:
                 return
 
             revision += 1
-            self.say(f"{BADGE_WARN} {t.id}: lead requested changes -> {first_line(feedback, 200)}")
+            if agent != "human" and (regressions or behavior_problem):
+                previous_builders = [a["agent"] for a in t.attempts if a.get("result") == "revise"]
+                alternate = self._pick_worker(exclude=tried + previous_builders + ["human"])
+                if alternate:
+                    self.say(f"{BADGE_INFO} {t.id}: giving the failed checks to {c_cyan(alternate)} for revision")
+                    agent = alternate
+            self.say(f"{BADGE_WARN} {t.id}: revision needed -> {first_line(feedback, 200)}")
 
     # ---------------------------------------------------------------- final
     def final_check(self) -> Dict:
@@ -2007,14 +2110,36 @@ class Conductor:
         self.say(f"\n{BADGE_INFO} {c_magenta(self.lead)} is checking the whole project (round {self.round})...")
         data = self.ask_lead("final", build_final_prompt(
             self.goal, self.dir, self.tasks, self.workers, self.specs, self.round, can_add, self.cfg.max_tasks,
-            checks), "complete")
+            checks, self.workflows), "complete", validate=lambda reply: workflows.final_reply_error(reply, self.workflows))
+        reviewed = data is not None
         if data is None:
-            all_done = all(t.status == "done" for t in self.tasks)
-            data = {"complete": all_done, "summary": "Final review unavailable; status based on task results.",
-                    "how_to_run": "", "remaining_issues": [], "followup_tasks": []}
-        elif not can_add:
+            data = {"complete": False, "summary": "Final review unavailable.", "how_to_run": "",
+                    "remaining_issues": ["The integrated result still needs review."], "followup_tasks": []}
+        data["complete"] = data.get("complete") is True
+        issues = data.get("remaining_issues")
+        data["remaining_issues"] = [i for i in issues if isinstance(i, str) and i.strip()] if isinstance(issues, list) else []
+        data = enforce_completion_gate(data, self.tasks, checks)
+        rows = workflows.assess(self.workflows, self.tasks, checks, data)
+        data["workflow_results"] = rows
+        gaps = [r for r in rows if r["status"] != "met"]
+        for row in gaps:
+            data["remaining_issues"].append("{id} {scenario} — {status}: {evidence}".format(**row))
+        if data["remaining_issues"] or data.get("followup_tasks"):
+            data["complete"] = False
+        if gaps:
+            if reviewed and can_add and not data.get("followup_tasks") and not self.budget_reason:
+                have, missing = tool_report()
+                prompt = build_plan_prompt(self.goal, self.dir, self.specs, self.workers, have, self.cfg.max_tasks,
+                                           missing, protected_paths=self.protected_paths)
+                prompt += ("\nPlan only the repairs for these observed workflow gaps. Preserve passing workflows "
+                           "and existing checks. For a workflow without a runnable check, add a task that exercises "
+                           "the scenario and names it in that task's instructions.\n" +
+                           "\n".join(data["remaining_issues"]))
+                repair = self.ask_lead("repair-plan", prompt, "tasks")
+                data["followup_tasks"] = (repair or {}).get("tasks", [])
+        if not can_add:
             data["followup_tasks"] = []
-        return enforce_completion_gate(data, self.tasks, checks)
+        return data
 
     # ---------------------------------------------------------------- report
     def write_report(self) -> Path:
@@ -2040,6 +2165,13 @@ class Conductor:
             note = (t.review_note or first_line(t.summary)).replace("|", "/")[:120]
             lines.append(f"| {t.id} {t.title.replace('|', '/')} | {t.agent_used or t.assignee} | {t.status} | "
                          f"{len(t.attempts)} | {t.commit or '-'} | {note} |")
+        if isinstance(self.final.get("workflow_results"), list) and self.final["workflow_results"]:
+            lines += ["", "## User workflows", ""]
+            for row in self.final["workflow_results"]:
+                line = "- **{status}** · {scenario} — {evidence}".format(**row)
+                if row["verify"]:
+                    line += " (check: `{}`)".format(row["verify"])
+                lines.append(line)
         issues = self.final.get("remaining_issues") or []
         if issues:
             lines += ["", "## Remaining issues"] + [f"- {i}" for i in issues]

@@ -7,9 +7,9 @@ import subprocess
 import time
 from pathlib import Path
 
-from omnicli import agents, runs, settings
-from omnicli.conductor import MAX_DIFF_CHARS, TeamConfig, build_worker_prompt, verify_passed
-from omnicli.ui import BADGE_FAILED, BADGE_INFO, BADGE_WARN, c_bold, c_cyan
+from omnicli import agents, runs, settings, workflows
+from omnicli.conductor import MAX_DIFF_CHARS, Task, TeamConfig, build_worker_prompt
+from omnicli.ui import BADGE_INFO, c_bold, c_cyan
 
 NAMES = ["arena"]
 
@@ -24,16 +24,15 @@ def add_parser(subparsers):
 
 
 def blind_labels(names, rng=None):
-    labels = [chr(ord("A") + index) for index in range(len(names))]
-    pairs = list(zip(labels, names))
-    (rng or random.SystemRandom()).shuffle(pairs)
-    return pairs
+    shuffled = list(names)
+    (rng or random.SystemRandom()).shuffle(shuffled)
+    return [(chr(ord("A") + index), name) for index, name in enumerate(shuffled)]
 
 
 def anonymize_candidates(results, rng=None):
     labels = blind_labels([row["agent"] for row in results], rng)
-    by_agent = {name: label for label, name in labels}
-    return labels, {by_agent[row["agent"]]: row for row in results}
+    by_agent = {row["agent"]: row for row in results}
+    return labels, {label: by_agent[name] for label, name in labels}
 
 
 def _git(root, *args, **kwargs):
@@ -53,8 +52,11 @@ def run_arena(ref, task_id, agent_names, lead=None):
     task_index = next((i for i, row in enumerate(state["tasks"]) if row.get("id") == task_id), None)
     if task_index is None:
         raise ValueError("task {!r} is not in this run".format(task_id))
-    from omnicli.conductor import Task
-    agents_task = Task.from_dict(state["tasks"][task_index])
+    tasks = [Task.from_dict(row) for row in state["tasks"]]
+    agents_task = tasks[task_index]
+    journeys = workflows.from_plan(state, tasks) if state.get("workflows") else []
+    previous = workflows.interaction_commands(journeys, [t for t in tasks if t.status in ("done", "failed")])
+    checks = [cmd for cmd in previous if cmd != agents_task.verify]
     root_result = _git(project, "rev-parse", "--show-toplevel")
     if root_result.returncode:
         raise ValueError("arena requires the project to be inside a Git repository")
@@ -90,12 +92,21 @@ def run_arena(ref, task_id, agent_names, lead=None):
     arena_root = root / ".omnicli" / "team" / "arena" / str(int(time.time()))
     arena_root.mkdir(parents=True, exist_ok=False)
     results = []
+    preserve = []
     try:
+        if checks:
+            baseline = arena_root / "baseline"
+            added = _git(root, "worktree", "add", "--detach", str(baseline), head_id)
+            if added.returncode:
+                raise ValueError("could not create the arena baseline worktree")
+            issues = conductor.workflow_issues(checks, baseline / project_subdir)
+            preserve = [cmd for cmd in checks if cmd not in issues]
         for index, name in enumerate(agent_names):
             worktree = arena_root / ("candidate-{}".format(index + 1))
             added = _git(root, "worktree", "add", "--detach", str(worktree), head_id)
             if added.returncode:
                 raise ValueError("could not create arena worktree: {}".format((added.stderr or added.stdout).strip()))
+            workspace = worktree / project_subdir
             if task_commit:
                 undone = _git(worktree, "revert", "--no-commit", task_commit)
                 if undone.returncode:
@@ -107,9 +118,9 @@ def run_arena(ref, task_id, agent_names, lead=None):
             if start_tree.returncode:
                 raise ValueError("could not snapshot the arena starting point")
             base = start_tree.stdout.strip()
-            workspace = worktree / project_subdir
             prompt = build_worker_prompt(agents_task, state.get("goal", ""), workspace, "Anonymous arena participant",
-                                         conductor.lead, [agents_task])
+                                         conductor.lead, tasks, plan_summary=state.get("plan_summary", ""),
+                                         user_workflows=journeys)
             if not conductor._reserve_call():
                 results.append({"agent": name, "ok": False, "verify": None,
                                 "error": "session budget reached before this candidate"})
@@ -119,47 +130,67 @@ def run_arena(ref, task_id, agent_names, lead=None):
                                    timeout=cfg.task_timeout_min * 60,
                                    log_path=conductor.logs / "arena-{}-{}.md".format(task_id, index + 1),
                                    meta={"kind": "task", "run_dir": str(project), "task_id": task_id})
-            verify = conductor.run_verify(agents_task, workspace) if run.ok else None
+            # Freeze the proposal before running the checks so their generated files never enter the patch.
             add = _git(worktree, "add", "-A")
-            # the candidate's finished project as a tree object (shared with the main repo): exactly what was
-            # verified, and exactly what is applied if it wins. Tree-to-tree diffs need no pathspecs.
             tree = _git(worktree, "write-tree") if add.returncode == 0 else None
             tree_id = tree.stdout.strip() if tree and tree.returncode == 0 else ""
+            verify = conductor.run_verify(agents_task, workspace) if run.ok else None
+            issues = conductor.workflow_issues(checks, workspace) if run.ok else {}
+            passed = [cmd for cmd in checks if cmd not in issues] if run.ok else []
+            if agents_task.verify:
+                problem = workflows.check_problem(agents_task.verify, verify)
+                if problem:
+                    issues[agents_task.verify] = problem
+                else:
+                    passed.append(agents_task.verify)
             diff = _git(worktree, "diff", "--binary", base, tree_id) if tree_id else None
             stat = _git(worktree, "diff", "--stat", base, tree_id) if tree_id else None
-            results.append({"agent": name, "ok": run.ok and bool(tree_id), "verify": verify,
+            results.append({"agent": name, "ok": run.ok and bool(tree_id), "verify": verify, "issues": issues,
+                            "passed": passed,
                             "error": run.failure_reason() if not run.ok else ("" if tree_id else "could not snapshot"),
                             "diff": (diff.stdout if diff and diff.returncode == 0 else ""),
                             "summary": (stat.stdout if stat and stat.returncode == 0 else ""),
                             "tree": tree_id})
 
-        ready = [row for row in results if row["ok"]]
-        if not ready:
-            raise ValueError("no arena candidate completed successfully")
-        labels, blind = anonymize_candidates(ready)
+        _, blind = anonymize_candidates(results)
+        required = set(preserve)
+        if agents_task.verify:
+            required.add(agents_task.verify)
+        eligible = workflows.strongest_candidates(blind, required)
+        if not eligible:
+            reasons = ["{}: {}".format(label, row.get("error") or str(row.get("issues")))
+                       for label, row in blind.items()]
+            raise ValueError("no eligible arena candidate; " + " | ".join(reasons))
         prompt_rows = []
-        for label, row in blind.items():
-            verification = "not configured" if row["verify"] is None else ("PASS" if verify_passed(row["verify"]) else
-                                                                           "FAIL: " + str(row["verify"][1])[:1500])
+        for label, row in eligible.items():
+            verification = "Passed: {}\nOther check results: {}".format(
+                ", ".join(row["passed"]) or "(none)", row["issues"] or "(none)")
             prompt_rows.append("CANDIDATE {}\nVerify: {}\nChanges:\n{}\nDiff:\n{}".format(
                 label, verification, row["summary"][:2000], row["diff"][:MAX_DIFF_CHARS]))
         lead_prompt = """[OmniCLI blind arena decision]
-Several independent implementations of the same task were built in isolated copies. The candidates are
-anonymized; do not guess who wrote them. Choose the best implementation based on correctness, maintainability,
-and the listed verification result. Prefer a passing candidate. If none pass, return winner as an empty string.
+These candidates survived the executable checks. Compare them against the user's goal and acceptance criteria.
+Use specific evidence in the diff or check results to explain your choice. For an editor, consider what a person
+can create, edit, save and reopen, and whether the controls are discoverable. Consider edge cases and the cost
+of maintaining the implementation. If none meet the task, return winner as an empty string.
 Reply only with JSON: {{"winner":"A","reason":"short explanation"}}.
 
+GOAL: {}
 TASK: {} — {}
+INSTRUCTIONS: {}
+ACCEPTANCE: {}
+USER WORKFLOWS:
 {}
-""".format(task_id, agents_task.title, "\n\n".join(prompt_rows))
-        decision = conductor.ask_lead("arena", lead_prompt, "winner")
+{}
+""".format(cfg.goal, task_id, agents_task.title, agents_task.instructions, agents_task.acceptance,
+           workflows.describe(journeys), "\n\n".join(prompt_rows))
+        if len(eligible) == 1 and next(iter(eligible.values()))["passed"]:
+            decision = {"winner": next(iter(eligible)), "reason": "Strongest coverage of verified behaviors."}
+        else:
+            decision = conductor.ask_lead("arena", lead_prompt, "winner")
         chosen_label = str((decision or {}).get("winner", "")).strip().upper()
-        chosen = blind.get(chosen_label)
+        chosen = eligible.get(chosen_label)
         if not chosen:
             raise ValueError("the lead did not select a valid passing arena candidate")
-        if chosen["verify"] is not None and not verify_passed(chosen["verify"]):
-            raise ValueError("the lead selected a candidate whose verification failed; no changes were applied")
-        winning_label = next(label for label, name in labels if name == chosen["agent"])
         # The project must still be where the arena started, then it becomes exactly the winner's tree.
         now_head = _git(root, "rev-parse", "--verify", "HEAD").stdout.strip()
         now_status = _git(root, "status", "--porcelain")
@@ -176,17 +207,21 @@ TASK: {} — {}
         result_dir = project / ".omnicli" / "team" / "arena-results"
         result_dir.mkdir(parents=True, exist_ok=True)
         record = {"task": task_id, "base": head_id, "undid_task_commit": task_commit or "",
-                  "winner": chosen["agent"], "blind_label": winning_label, "winner_tree": chosen["tree"],
+                  "winner": chosen["agent"], "blind_label": chosen_label, "winner_tree": chosen["tree"],
+                  "preserved_checks": preserve,
                   "reason": (decision or {}).get("reason", ""),
                   "candidates": [{"label": label, "agent": row["agent"], "ok": row["ok"],
                                   "verify_exit": row["verify"][0] if row["verify"] else None,
-                                  "summary": row["summary"][:2000]} for label, row in sorted(blind.items())]}
+                                  "shortlisted": label in eligible, "passed": row.get("passed", []),
+                                  "issues": row.get("issues", {}),
+                                  "error": row.get("error", ""), "summary": row.get("summary", "")[:2000]}
+                                 for label, row in blind.items()]}
         (result_dir / "{}.json".format(datetime.datetime.now().strftime("%Y%m%d-%H%M%S"))).write_text(
             json.dumps(record, indent=2), encoding="utf-8")
         return record
     finally:
-        for index in range(len(agent_names)):
-            worktree = arena_root / ("candidate-{}".format(index + 1))
+        for name in ["baseline"] + ["candidate-{}".format(i + 1) for i in range(len(agent_names))]:
+            worktree = arena_root / name
             if worktree.exists():
                 _git(root, "worktree", "remove", "--force", str(worktree))
 

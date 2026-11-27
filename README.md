@@ -130,12 +130,21 @@ How it behaves:
   are left off the team with the reason shown. Successful pings are cached for 6 h; failures are re-checked every run.
 - **Self-healing** – if a worker crashes, times out or turns out to be logged out, its task is handed to another worker.
   If the lead fails, another ready agent takes over as lead.
-- **Review loop** – after each task OmniCLI runs the task's `verify` command, then the lead reviews the diff and either
-  approves or sends precise revision instructions back to the worker (`--retries`, default 1).
+- **Plan by workflow.** The lead names the actions a user should be able to perform, the observable outcomes,
+  and the task whose test exercises each one. Workers receive the original goal, shared implementation
+  decisions, and these workflows. Chat builds also carry the user's original request alongside the proposed brief.
+- **Repair failed behavior.** A failing task check goes back to the worker with its command and output.
+  The lead reviews the work after the check stops failing. A rejected isolated worktree is retained for inspection.
+  The `--retries` setting controls the number of repair attempts (default 1).
 - **Honest final check** – before the lead's final review, OmniCLI re-runs every task's `verify` command on the
   finished project and gives the lead the real results (the lead itself is read-only and can't run commands).
   A worker that exits 0 but produces nothing (e.g. a tool was auto-denied headlessly) counts as failed and the task
-  moves to another worker.
+  moves to another worker. The report lists the evidence for each agreed workflow. Unmet or unverified
+  workflows keep the run incomplete and can trigger focused repairs within the configured rounds and budget.
+  For an interactive workflow, the final review requires a linked executable check and a specific observation.
+
+  For a Word, PowerPoint, and Excel-style suite, examples include reopening a formatted document, presenting
+  slides in their new order, and recalculating a spreadsheet formula after a cell edit.
 - **Checkpoints** – each finished task is a git commit (`t2: Backend API [muse]`), so you can inspect or revert any
   agent's work. Logs and state live in `<project>/.omnicli/team/` (git-excluded); the final `REPORT.md` is there too.
 - **Safe by default** – workers use each CLI's own safe auto-edit mode (Claude `acceptEdits` + an allow-list of
@@ -185,8 +194,15 @@ How it behaves:
   `--red-team` asks a different provider to add adversarial tests before verification and review.
 - **Human teammate:** add `--human` or include `me` in `--workers claude,codex,me`. OmniCLI pauses with the task
   and workspace path, then runs the normal verify and review steps when you return `done`.
-- **Blind arena:** `omnicli arena REF TASK --agents claude,codex[,muse]` builds in isolated Git worktrees,
-  shares anonymized diffs and verify results with the lead, and stages the selected patch for inspection.
+- **Workflow checks during team runs.** Before a worker edits, OmniCLI runs the planned interaction checks from
+  finished tasks. Each revision must keep the passing checks working. A failed interaction goes to another
+  available worker within the existing retry budget, or back to the same worker when running solo.
+  With `--worktrees`, a rejected implementation stays in its isolated directory.
+- **Blind arena.** `omnicli arena REF TASK --agents claude,codex[,muse]` compares implementations in separate
+  Git worktrees. Each candidate must pass the configured task check and preserve every tested interaction that
+  passed on the starting commit. If one candidate also restores everything another restores and more, OmniCLI
+  favors it. The lead judges ties and trade-offs using anonymized diffs, check results, and the original goal.
+  The winner's patch is staged for inspection.
 - **Flight recorder and branching:** `omnicli timeline REF --diff` shows attempts, review feedback, checkpoints,
   and saved diffs. `omnicli fork REF TASK --agent muse` makes a worktree at the task's parent checkpoint and resumes
   from that task with the selected agent.
