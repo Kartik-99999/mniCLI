@@ -21,6 +21,8 @@ class ArenaTests(unittest.TestCase):
         self.assertEqual(set(blind), {label for label, _agent in labels})
         self.assertEqual({row["diff"] for row in blind.values()}, {"one", "two"})
         self.assertNotIn("claude", blind)
+        self.assertEqual(list(blind), ["A", "B"])
+        self.assertEqual(blind["A"]["agent"], "codex")
 
 
 if __name__ == "__main__":

@@ -194,8 +194,15 @@ How it behaves:
   `--red-team` asks a different provider to add adversarial tests before verification and review.
 - **Human teammate:** add `--human` or include `me` in `--workers claude,codex,me`. OmniCLI pauses with the task
   and workspace path, then runs the normal verify and review steps when you return `done`.
-- **Blind arena:** `omnicli arena REF TASK --agents claude,codex[,muse]` builds in isolated Git worktrees,
-  shares anonymized diffs and verify results with the lead, and stages the selected patch for inspection.
+- **Workflow checks during team runs.** Before a worker edits, OmniCLI runs the planned interaction checks from
+  finished tasks. Each revision must keep the passing checks working. A failed interaction goes to another
+  available worker within the existing retry budget, or back to the same worker when running solo.
+  With `--worktrees`, a rejected implementation stays in its isolated directory.
+- **Blind arena.** `omnicli arena REF TASK --agents claude,codex[,muse]` compares implementations in separate
+  Git worktrees. Each candidate must pass the configured task check and preserve every tested interaction that
+  passed on the starting commit. If one candidate also restores everything another restores and more, OmniCLI
+  favors it. The lead judges ties and trade-offs using anonymized diffs, check results, and the original goal.
+  The winner's patch is staged for inspection.
 - **Flight recorder and branching:** `omnicli timeline REF --diff` shows attempts, review feedback, checkpoints,
   and saved diffs. `omnicli fork REF TASK --agent muse` makes a worktree at the task's parent checkpoint and resumes
   from that task with the selected agent.

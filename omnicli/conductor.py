@@ -88,6 +88,8 @@ class Task:
     duration_sec: float = 0.0
     workspace: str = ""
     outcome_recorded: bool = False
+    # Behaviors observed before or during this task that each subsequent revision must retain.
+    passing_workflow_checks: Optional[List[str]] = None
 
     @classmethod
     def from_dict(cls, d: Dict) -> "Task":
@@ -496,7 +498,8 @@ RULES:
   use primary docs if accessible and identify assumptions that need a local experiment.
 - Record the main user workflows before splitting the implementation. For each, describe the user's action,
   the resulting state, and what must still work after the next action or reload. Assign a behavior test to a
-  task and reference its id in check_task. Multiple workflows can use the same test suite. For inspectable
+  task and reference its id in check_task. For independently shipped features, use focused checks so a later
+  change can be tested against each finished feature. Workflows may share an integration suite. For inspectable
   deliverables such as documentation, set kind to inspection and describe what the reviewer must inspect.
   For interactive user journeys set kind to interaction. If execution is unavailable, leave check_task empty
   and report that journey as unverified.
@@ -1841,15 +1844,39 @@ class Conductor:
         except Exception as ex:
             return 1, f"could not run verify command: {ex}", ""
 
+    def workflow_issues(self, commands, workspace):
+        issues = {}
+        for command in dict.fromkeys(commands):
+            check = Task(id="workflow", title="", assignee="", instructions="", verify=command)
+            problem = workflows.check_problem(command, self.run_verify(check, workspace))
+            if problem:
+                issues[command] = problem
+        return issues
+
     def _run_task(self, t: Task):
         start = time.time()
         workspace = self._task_workspace(t)
+        finished = [task for task in self.tasks if task.status in ("done", "failed") and task.id != t.id]
+        linked_checks = workflows.interaction_commands(self.workflows, finished)
+        previous = [cmd for cmd in linked_checks if cmd != t.verify]
+        if t.passing_workflow_checks is None:
+            issues = self.workflow_issues(previous, workspace)
+            t.passing_workflow_checks = [cmd for cmd in previous if cmd not in issues]
+            if previous:
+                self.save_state()
+        interaction = t.verify in linked_checks or bool(workflows.interaction_commands(self.workflows, [t]))
         tried: List[str] = []
         agent = "human" if t.assignee == "human" and self.cfg.human_worker else (
             t.assignee if self._usable(t.assignee) else self._pick_worker(exclude=[]))
         if agent and agent != t.assignee:
             self.say(f"{BADGE_WARN} {t.id}: {t.assignee} unavailable, giving it to {agent}")
         revision, feedback = 0, ""
+        if t.attempts and t.attempts[-1].get("result") == "revise" and "workflow_regressions" in t.attempts[-1]:
+            last = t.attempts[-1]
+            revision, feedback = last.get("revision", 0) + 1, last["feedback"]
+            if agent != "human":
+                previous_builders = [a["agent"] for a in t.attempts if a.get("result") == "revise"]
+                agent = self._pick_worker(exclude=previous_builders + ["human"]) or agent
 
         while True:
             if self.stopping:
@@ -1952,7 +1979,22 @@ class Conductor:
             else:
                 files, changes, _patch = self._collect_workspace_changes(workspace, scope)
 
-            if not verify_passed(verify):
+            issues = self.workflow_issues(previous, workspace)
+            regressions = {cmd: reason for cmd, reason in issues.items() if cmd in t.passing_workflow_checks}
+            # A revision may restore a previously broken journey before it finishes its own task.
+            # Keep that gain as a requirement for the next revision, even after a pause.
+            t.passing_workflow_checks = [cmd for cmd in previous if cmd not in issues or cmd in regressions]
+            behavior_problem = workflows.check_problem(t.verify, verify) if interaction else ""
+            if regressions or behavior_problem:
+                details = ["Previously passed `{}`, now {}.".format(cmd, reason)
+                           for cmd, reason in regressions.items()]
+                if behavior_problem:
+                    details.append("Task check `{}`: {}.".format(t.verify, behavior_problem))
+                attempt["workflow_regressions"] = list(regressions)
+                verdict = {"verdict": "revise", "summary": first_line(summary),
+                           "feedback": "Repair the implementation and keep the acceptance checks intact.\n"
+                                       + "\n".join(details)}
+            elif not verify_passed(verify):
                 verdict = {"verdict": "revise", "summary": first_line(summary),
                            "feedback": f"Repair the behavior behind `{t.verify}` (exit {verify[0]}). "
                                        f"Keep the acceptance check intact and rerun it.\n{verify[1]}"}
@@ -2024,9 +2066,7 @@ class Conductor:
                 with self.lock:
                     t.agent_used = agent
                     t.summary = str(verdict.get("summary") or "") + ("\n" + summary if summary else "")
-                    if approved:
-                        t.status = "done"
-                    else:
+                    if not approved:
                         t.status = "failed"
                         t.review_note = f"Acceptance still unmet after {revision + 1} attempt(s): " + (
                             feedback or "acceptance criteria remain unmet")
@@ -2034,9 +2074,12 @@ class Conductor:
                 if approved:
                     if workspace != self.dir:
                         t.commit = self._checkpoint_workspace(t, workspace, scope)
-                        self._remove_task_workspace(t)
                     else:
                         t.commit = self.checkpoint(t, scope)
+                    with self.lock:
+                        t.status = "done"
+                    if workspace != self.dir:
+                        self._remove_task_workspace(t)
                     extra = c_dim(f" ({t.review_note})") if t.review_note else ""
                     self.say(f"{BADGE_SUCCESS} {c_bold(t.id)} {t.title} - by {c_cyan(agent)}"
                              f"{c_dim(' @' + t.commit) if t.commit else ''}{extra}")
@@ -2045,6 +2088,12 @@ class Conductor:
                 return
 
             revision += 1
+            if agent != "human" and (regressions or behavior_problem):
+                previous_builders = [a["agent"] for a in t.attempts if a.get("result") == "revise"]
+                alternate = self._pick_worker(exclude=tried + previous_builders + ["human"])
+                if alternate:
+                    self.say(f"{BADGE_INFO} {t.id}: giving the failed checks to {c_cyan(alternate)} for revision")
+                    agent = alternate
             self.say(f"{BADGE_WARN} {t.id}: revision needed -> {first_line(feedback, 200)}")
 
     # ---------------------------------------------------------------- final

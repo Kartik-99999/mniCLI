@@ -47,14 +47,54 @@ def only_static_checks(command: str) -> bool:
     return bool(chain) and all(_static_check(seg.argv) for _, pipeline in chain for seg in pipeline.segs)
 
 
-def empty_test_run(command: str, output: str) -> bool:
+def unexercised_tests(command: str, output: str) -> str:
     chain, _ = parse_command(command)
     if not chain or len(chain) != 1 or len(chain[0][1].segs) != 1:
-        return False
+        return ""
     argv = chain[0][1].segs[0].argv
     if argv[0] in {"python", "python3"} and "unittest" in argv:
-        return bool(re.search(r"^Ran 0 tests in [\d.]+s\s*$", output, re.M))
-    return argv[:2] == ["node", "--test"] and bool(re.search(r"^# tests 0\s*$", output, re.M))
+        total = re.search(r"^Ran (\d+) tests? in [\d.]+s\s*$", output, re.M)
+        skipped = re.search(r"^OK \(skipped=(\d+)\)\s*$", output, re.M)
+        if total and total[1] == "0":
+            return "the runner reported zero tests"
+        if total and skipped and total[1] == skipped[1]:
+            return "the runner skipped every test"
+    if argv[:2] == ["node", "--test"]:
+        counts = {key: int(n) for key, n in re.findall(r"^# (tests|skipped|todo) (\d+)\s*$", output, re.M)}
+        if counts.get("tests") == 0:
+            return "the runner reported zero tests"
+        if counts.get("tests") == counts.get("skipped", 0) + counts.get("todo", 0):
+            return "every test was skipped or marked TODO"
+    return ""
+
+
+def interaction_commands(workflows, tasks):
+    """Distinct commands associated with the selected tasks' interactive user journeys."""
+    linked = {w["check_task"] for w in workflows if w["kind"] == "interaction"}
+    return list(dict.fromkeys(t.verify for t in tasks if t.id in linked and t.verify))
+
+
+def check_problem(command, result):
+    """An empty reason is affirmative evidence that this executable check passed."""
+    if result is None:
+        return "the check did not run"
+    code, output, unavailable = result
+    if unavailable:
+        return unavailable
+    unexercised = unexercised_tests(command, output)
+    if unexercised:
+        return unexercised
+    if code:
+        return "exit {}: {}".format(code, output.strip()[-1000:])
+    return ""
+
+
+def strongest_candidates(results, required):
+    """Keep successful candidates that preserve the baseline and aren't beaten on every check they pass."""
+    eligible = {label: set(row["passed"]) for label, row in results.items()
+                if row["ok"] and required.issubset(row["passed"])}
+    return {label: results[label] for label, passed in eligible.items()
+            if not any(passed < other for other in eligible.values())}
 
 
 def from_plan(data: Dict, tasks: List) -> List[Dict]:
@@ -133,13 +173,14 @@ def assess(workflows, tasks, checks, review):
             status, detail = "unverified", "No executable interaction check was linked to this workflow."
         if check_task:
             check = results.get(command)
+            unexercised = unexercised_tests(command, check[1]) if check and workflow["kind"] == "interaction" else ""
             if check is None or check[2]:
                 status = "unverified"
                 detail = check[2] if check and check[2] else "The planned check did not run."
+            elif unexercised:
+                status, detail = "unverified", unexercised
             elif check[0]:
                 status = "unmet"
                 detail = "Check exited {}. {}".format(check[0], check[1].strip()[-1500:])
-            elif workflow["kind"] == "interaction" and empty_test_run(command, check[1]):
-                status, detail = "unverified", "The runner reported zero tests for the planned interaction."
         rows.append(dict(workflow, id=key, status=status, evidence=detail.strip(), check_task=check_task, verify=command))
     return rows

@@ -117,6 +117,60 @@ class TestArenaEndToEnd(unittest.TestCase):
         record = json.loads(sorted((self.proj / ".omnicli" / "team" / "arena-results").glob("*.json"))[-1].read_text())
         self.assertEqual(winner_tree, record["winner_tree"])
 
+    def test_candidate_that_breaks_a_finished_workflow_cannot_win(self):
+        from omnicli import agents
+        from omnicli.commands.arena import run_arena
+        state_path = self.proj / ".omnicli/team/state.json"
+        state = json.loads(state_path.read_text())
+        state["tasks"].append({"id": "word", "title": "Save document", "assignee": "w1", "instructions": "",
+                               "status": "done", "verify": "python3 reopen.py"})
+        state["workflows"] = [{"kind": "interaction", "scenario": "Reopen the formatted text.", "check_task": "word"}]
+        state_path.write_text(json.dumps(state))
+        self._later_commit("reopen.py", "from pathlib import Path\nPath('check.log').write_text('ran')\n"
+                           "assert 'first' in Path('a/a.txt').read_text()\n",
+                           "add document persistence check")
+
+        def build(spec, prompt, mode, cwd, **kwargs):
+            self.assertEqual(mode, "edit")  # Only one candidate qualifies, so no judge is needed.
+            self.assertIn("Reopen the formatted text.", prompt)
+            output = Path(cwd) / "a/a.txt"
+            output.parent.mkdir(exist_ok=True)
+            output.write_text("first improved" if spec["id"] == "w2" else "pretty but broken")
+            return agents.AgentRun(spec["id"], 0, "completed", "", 0.01)
+
+        with mock.patch.object(agents, "run_agent", side_effect=build):
+            record = run_arena(str(self.proj), "t1", ["w1", "w2"], "judge")
+        self.assertEqual(record["winner"], "w2")
+        self.assertEqual(record["preserved_checks"], ["python3 reopen.py"])
+        loser, = [row for row in record["candidates"] if row["agent"] == "w1"]
+        self.assertEqual(loser["verify_exit"], 0)
+        self.assertFalse(loser["shortlisted"])
+        self.assertIn("python3 reopen.py", loser["issues"])
+        self.assertEqual((self.proj / "a/a.txt").read_text(), "first improved")
+        self.assertFalse((self.proj / "check.log").exists())
+        self.assertEqual(len(git(self.proj, "worktree", "list").splitlines()), 1)
+
+    def test_zero_discovered_tests_leaves_the_incumbent_untouched(self):
+        from omnicli.commands.arena import run_arena
+        state_path = self.proj / ".omnicli/team/state.json"
+        state = json.loads(state_path.read_text())
+        state["tasks"][0]["verify"] = "python3 -m unittest discover"
+        state_path.write_text(json.dumps(state))
+        with self.assertRaisesRegex(ValueError, "zero tests"):
+            run_arena(str(self.proj), "t1", ["w1", "w2"], "judge")
+        self.assertEqual(git(self.proj, "status", "--porcelain"), "")
+        self.assertEqual((self.proj / "a/a.txt").read_text(), "first version\n")
+
+    def test_unavailable_required_runner_cannot_be_selected(self):
+        from omnicli.commands.arena import run_arena
+        from omnicli.conductor import Conductor
+        with mock.patch.object(Conductor, "run_verify", return_value=(127, "", "runner unavailable")), \
+                mock.patch.object(Conductor, "ask_lead") as judge:
+            with self.assertRaisesRegex(ValueError, "runner unavailable"):
+                run_arena(str(self.proj), "t1", ["w1", "w2"], "judge")
+            judge.assert_not_called()
+        self.assertEqual(git(self.proj, "status", "--porcelain"), "")
+
     def test_refuses_when_later_work_touched_the_same_lines(self):
         from omnicli.commands.arena import run_arena
         self._later_commit("a/a.txt", "rewritten by a later task\n", "t2: rewrite a")
